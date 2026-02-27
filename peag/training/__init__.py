@@ -1,7 +1,7 @@
 """
-Training modules for PEAG.
-
-This module contains trainers, configuration, and evaluators for model training
-and evaluation.
+Training utilities for PEAG framework.
 """
 
+from peag.training.trainer import Trainer
+
+__all__ = ["Trainer"]

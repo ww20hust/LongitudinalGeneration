@@ -1,25 +1,27 @@
 """
-Main PEAG model class.
+Main PEAG model class with multi-visit and missing modality support.
 
-This module implements the complete PEAG framework, integrating all encoders,
-decoders, alignment mechanism, and adversarial components with recurrent
-mechanism for longitudinal data processing.
+This module implements the complete PEAG framework with:
+1. Loop-based processing for arbitrary number of visits
+2. Missing modality handling with masks
+3. Dynamic alignment and fusion based on available modalities
+4. Supervised imputation using available samples
 
-Reference: Methods section - Patient-context Enhanced Longitudinal Multimodal Alignment and Generation Framework
+Reference: Methods section - Patient-context Enhanced Longitudinal 
+           Multimodal Alignment and Generation Framework
 """
-
 import torch
 import torch.nn as nn
+from typing import Dict, List, Optional, Tuple, Any
 from peag.core.encoders import LabTestsEncoder, MetabolomicsEncoder, PastStateEncoder
 from peag.core.decoders import LabTestsDecoder, MetabolomicsDecoder
-from peag.core.alignment import align_distributions
-from peag.core.fusion import compute_visit_state
+from peag.core.alignment import align_distributions_dynamic
+from peag.core.fusion import compute_visit_state_dynamic
 from peag.core.adversarial import MissingnessDiscriminator
 from peag.utils.distributions import reparameterize
 from peag.losses import (
     reconstruction_loss,
     kl_divergence_loss,
-    alignment_penalty_loss,
     adversarial_loss_generator,
     compute_total_loss
 )
@@ -29,20 +31,28 @@ class PEAGModel(nn.Module):
     """
     Patient-context Enhanced Longitudinal Multimodal Alignment and Generation Model.
     
+    Enhanced version supporting:
+    - Multiple visits (loop-based processing)
+    - Missing modalities per visit (with masks)
+    - Dynamic alignment and fusion
+    - Supervised imputation training
+    
     The model processes longitudinal clinical visits by:
-    1. Encoding current modalities and Past-State into latent distributions
-    2. Aligning distributions using Jeffrey divergence
-    3. Fusing into unified Visit State
-    4. Decoding all modalities from Visit State
-    5. Using Visit State as Past-State for next visit
+    1. For each visit:
+       a. Encode available modalities (skip missing ones)
+       b. Align available distributions (exclude missing from alignment)
+       c. Fuse into Visit State using only available modalities
+       d. Decode all modalities from Visit State
+       e. Use Visit State as Past-State for next visit
+    2. Compute losses with missing value masking
+    3. Train imputation using available samples as supervision
     
     Reference: Methods section - The PEAG framework
     """
     
     def __init__(
         self,
-        lab_test_dim: int = 61,
-        metabolomics_dim: int = 251,
+        modality_dims: Dict[str, int],
         latent_dim: int = 16,
         hidden_dim: int = 128,
         lambda_kl: float = 1.0,
@@ -53,8 +63,8 @@ class PEAGModel(nn.Module):
         Initialize PEAG model.
         
         Args:
-            lab_test_dim: Dimension of lab test features (default: 61)
-            metabolomics_dim: Dimension of metabolomics features (default: 251)
+            modality_dims: Dictionary mapping modality names to their dimensions.
+                          e.g., {"lab": 61, "metab": 251}
             latent_dim: Dimension of latent space (default: 16)
             hidden_dim: Dimension of hidden layers (default: 128)
             lambda_kl: Weight for KL divergence loss (default: 1.0)
@@ -63,241 +73,355 @@ class PEAGModel(nn.Module):
         """
         super(PEAGModel, self).__init__()
         
-        self.lab_test_dim = lab_test_dim
-        self.metabolomics_dim = metabolomics_dim
+        self.modality_dims = modality_dims
         self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
         self.lambda_kl = lambda_kl
         self.lambda_align = lambda_align
         self.lambda_adv = lambda_adv
         
-        # Encoders
-        self.lab_encoder = LabTestsEncoder(latent_dim=latent_dim, hidden_dim=hidden_dim)
-        self.metab_encoder = MetabolomicsEncoder(latent_dim=latent_dim, hidden_dim=hidden_dim)
-        self.past_encoder = PastStateEncoder(latent_dim=latent_dim, hidden_dim=hidden_dim // 2)
+        # Create encoders for each modality
+        self.encoders = nn.ModuleDict()
+        for mod_name, mod_dim in modality_dims.items():
+            if mod_name == "lab":
+                self.encoders[mod_name] = LabTestsEncoder(
+                    input_dim=mod_dim, latent_dim=latent_dim, hidden_dim=hidden_dim
+                )
+            elif mod_name == "metab":
+                self.encoders[mod_name] = MetabolomicsEncoder(
+                    input_dim=mod_dim, latent_dim=latent_dim, hidden_dim=hidden_dim
+                )
+            else:
+                # Generic encoder for other modalities
+                from peag.core.encoders import GenericModalityEncoder
+                self.encoders[mod_name] = GenericModalityEncoder(
+                    input_dim=mod_dim, latent_dim=latent_dim, hidden_dim=hidden_dim
+                )
         
-        # Decoders
-        self.lab_decoder = LabTestsDecoder(latent_dim=latent_dim, hidden_dim=hidden_dim)
-        self.metab_decoder = MetabolomicsDecoder(latent_dim=latent_dim, hidden_dim=hidden_dim)
+        # Past-State encoder
+        self.past_encoder = PastStateEncoder(
+            latent_dim=latent_dim, hidden_dim=hidden_dim // 2
+        )
         
-        # Adversarial discriminator
+        # Create decoders for each modality
+        self.decoders = nn.ModuleDict()
+        for mod_name, mod_dim in modality_dims.items():
+            if mod_name == "lab":
+                self.decoders[mod_name] = LabTestsDecoder(
+                    latent_dim=latent_dim, hidden_dim=hidden_dim, output_dim=mod_dim
+                )
+            elif mod_name == "metab":
+                self.decoders[mod_name] = MetabolomicsDecoder(
+                    latent_dim=latent_dim, hidden_dim=hidden_dim, output_dim=mod_dim
+                )
+            else:
+                # Generic decoder for other modalities
+                from peag.core.decoders import GenericModalityDecoder
+                self.decoders[mod_name] = GenericModalityDecoder(
+                    latent_dim=latent_dim, hidden_dim=hidden_dim, output_dim=mod_dim
+                )
+        
+        # Adversarial discriminator (for metabolomics or primary modality)
+        primary_modality = list(modality_dims.keys())[0] if modality_dims else "metab"
         self.discriminator = MissingnessDiscriminator(
-            input_dim=metabolomics_dim,
+            input_dim=modality_dims.get(primary_modality, 251),
             hidden_dim=hidden_dim
         )
     
-    def encode(
+    def encode_visit(
         self,
-        lab_tests: torch.Tensor = None,
-        metabolomics: torch.Tensor = None,
-        past_state: torch.Tensor = None
-    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        visit_data: Dict[str, torch.Tensor],
+        missing_mask: Dict[str, int],
+        past_state: torch.Tensor
+    ) -> Tuple[
+        Dict[str, Tuple[torch.Tensor, torch.Tensor]],  # modality distributions
+        Tuple[torch.Tensor, torch.Tensor],              # past distribution
+        Dict[str, torch.Tensor]                        # available modality means
+    ]:
         """
-        Encode modalities and Past-State to latent distributions.
-        
-        Reference: Methods section - Modality-Specific Encoders and Past-State Integration
+        Encode a single visit's data.
         
         Args:
-            lab_tests: Lab test features of shape (batch_size, lab_test_dim) or None
-            metabolomics: Metabolomics features of shape (batch_size, metabolomics_dim) or None
-            past_state: Past-State vector of shape (batch_size, latent_dim) or None
+            visit_data: Dictionary of modality data for this visit
+            missing_mask: Dictionary indicating which modalities are missing
+            past_state: Past-State from previous visit
         
         Returns:
-            Dictionary with encoded distributions (mu, logvar) for each available modality
+            modality_dists: Distributions for each available modality
+            past_dist: Distribution for Past-State
+            available_mus: Means of available modalities for fusion
         """
-        encodings = {}
+        device = past_state.device
         
-        if lab_tests is not None:
-            z_lab_mu, z_lab_logvar = self.lab_encoder(lab_tests)
-            encodings["lab"] = (z_lab_mu, z_lab_logvar)
+        # Encode available modalities
+        modality_dists = {}
+        available_mus = {}
         
-        if metabolomics is not None:
-            z_metab_mu, z_metab_logvar = self.metab_encoder(metabolomics)
-            encodings["metab"] = (z_metab_mu, z_metab_logvar)
+        for mod_name, mod_data in visit_data.items():
+            # Skip if modality is not available (mask != 0) or input is None
+            if missing_mask.get(mod_name, 2) != 0 or mod_data is None:
+                continue
+            
+            # Encode this modality
+            mu, logvar = self.encoders[mod_name](mod_data)
+            modality_dists[mod_name] = (mu, logvar)
+            available_mus[mod_name] = mu
         
-        if past_state is not None:
-            z_past_mu, z_past_logvar = self.past_encoder(past_state)
-            encodings["past"] = (z_past_mu, z_past_logvar)
+        # Encode Past-State
+        past_mu, past_logvar = self.past_encoder(past_state)
+        past_dist = (past_mu, past_logvar)
         
-        return encodings
+        return modality_dists, past_dist, available_mus
+    
+    def process_visit(
+        self,
+        visit_data: Dict[str, torch.Tensor],
+        missing_mask: Dict[str, int],
+        past_state: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor, Dict[str, Any]]:
+        """
+        Process a single visit through encode-align-fuse-decode pipeline.
+        
+        Args:
+            visit_data: Dictionary of modality data
+            missing_mask: Dictionary of missing flags
+            past_state: Past-State tensor
+        
+        Returns:
+            visit_state: Computed Visit State
+            reconstructions: Dictionary of reconstructed modalities
+            alignment_loss: Alignment loss for this visit
+            debug_info: Dictionary with intermediate values for debugging
+        """
+        # Encode
+        modality_dists, (past_mu, past_logvar), available_mus = self.encode_visit(
+            visit_data, missing_mask, past_state
+        )
+        
+        # Align distributions (only available modalities)
+        alignment_loss = align_distributions_dynamic(
+            modality_distributions=modality_dists,
+            z_past_mu=past_mu,
+            z_past_logvar=past_logvar,
+            missing_mask=missing_mask
+        )
+        
+        # Compute Visit State (only using available modalities)
+        visit_state = compute_visit_state_dynamic(available_mus, past_mu)
+        
+        # Decode all modalities from Visit State
+        reconstructions = {}
+        for mod_name in self.modality_dims.keys():
+            reconstructions[mod_name] = self.decoders[mod_name](visit_state)
+        
+        debug_info = {
+            "modality_dists": modality_dists,
+            "past_dist": (past_mu, past_logvar),
+            "available_mus": available_mus
+        }
+        
+        return visit_state, reconstructions, alignment_loss, debug_info
     
     def forward(
         self,
-        lab_tests_baseline: torch.Tensor,
-        metabolomics_baseline: torch.Tensor,
-        lab_tests_followup: torch.Tensor,
-        metabolomics_followup: torch.Tensor = None,
-        mode: str = "full",
+        visits_data: List[Dict[str, torch.Tensor]],
+        missing_masks: List[Dict[str, int]],
         kl_annealing_weight: float = 1.0,
-        return_visit_state: bool = False
-    ) -> dict[str, torch.Tensor]:
+        return_all_visit_states: bool = False,
+        recon_targets: Optional[List[Dict[str, torch.Tensor]]] = None,
+    ) -> Dict[str, Any]:
         """
-        Forward pass through the model.
-        
-        Reference: Methods section - The PEAG framework
+        Forward pass through the model with loop-based multi-visit processing.
         
         Args:
-            lab_tests_baseline: Baseline lab tests (batch_size, lab_test_dim)
-            metabolomics_baseline: Baseline metabolomics (batch_size, metabolomics_dim)
-            lab_tests_followup: Follow-up lab tests (batch_size, lab_test_dim)
-            metabolomics_followup: Follow-up metabolomics (batch_size, metabolomics_dim) or None
-            mode: Ablation mode - "full", "baseline_only", or "followup_only"
-            kl_annealing_weight: KL annealing weight (0 to 1) for gradual KL increase
-            return_visit_state: Whether to return Visit State for next visit
+            visits_data: List of visit data dictionaries.
+                        Each dictionary maps modality names to tensors.
+                        Length = number of visits.
+            missing_masks: List of missing mask dictionaries.
+                          Each dictionary maps modality names to int codes:
+                          0 = available, 1 = actively masked, 2 = naturally missing.
+                          Length = number of visits.
+            kl_annealing_weight: KL annealing weight (0 to 1)
+            return_all_visit_states: Whether to return all visit states
         
         Returns:
             Dictionary containing:
-            - predictions: Decoded lab tests and metabolomics
+            - reconstructions: List of reconstruction dicts per visit
             - losses: All loss components
-            - visit_state: Visit State (if return_visit_state=True)
+            - visit_states: List of visit states (if return_all_visit_states=True)
+        
+        Example:
+            >>> visits_data = [
+            ...     {"lab": lab_t1, "metab": metab_t1},  # Visit 1
+            ...     {"lab": lab_t2, "metab": None},       # Visit 2 (missing metab)
+            ...     {"lab": lab_t3, "metab": metab_t3},   # Visit 3
+            ... ]
+            >>> missing_masks = [
+            ...     {"lab": False, "metab": False},
+            ...     {"lab": False, "metab": True},
+            ...     {"lab": False, "metab": False},
+            ... ]
         """
-        batch_size = lab_tests_baseline.shape[0]
-        device = lab_tests_baseline.device
+        if len(visits_data) == 0:
+            raise ValueError("No visit data provided")
         
-        # ===== BASELINE VISIT =====
-        # Encode Baseline visit
-        baseline_encodings = self.encode(
-            lab_tests=lab_tests_baseline,
-            metabolomics=metabolomics_baseline
-        )
+        if len(visits_data) != len(missing_masks):
+            raise ValueError("visits_data and missing_masks must have same length")
         
-        z_lab_baseline_mu, z_lab_baseline_logvar = baseline_encodings["lab"]
-        z_metab_baseline_mu, z_metab_baseline_logvar = baseline_encodings["metab"]
+        batch_size = list(visits_data[0].values())[0].shape[0]
+        device = list(visits_data[0].values())[0].device
         
-        # Initialize Past-State for Baseline (zeros for first visit)
-        past_state_baseline = torch.zeros(batch_size, self.latent_dim, device=device)
-        z_past_baseline_mu, z_past_baseline_logvar = self.past_encoder(past_state_baseline)
+        # Initialize Past-State for first visit (zeros)
+        past_state = torch.zeros(batch_size, self.latent_dim, device=device)
         
-        # Align Baseline distributions
-        alignment_loss_baseline = align_distributions(
-            z_lab_baseline_mu, z_lab_baseline_logvar,
-            z_metab_baseline_mu, z_metab_baseline_logvar,
-            z_past_baseline_mu, z_past_baseline_logvar
-        )
+        # Storage for outputs
+        all_reconstructions = []
+        all_visit_states = []
+        all_alignment_losses = []
+        all_modality_dists = []
+        all_past_dists = []
         
-        # Compute Baseline Visit State
-        visit_state_baseline = compute_visit_state(
-            z_lab_baseline_mu,
-            z_metab_baseline_mu,
-            z_past_baseline_mu
-        )
-        
-        # Decode Baseline visit
-        lab_recon_baseline = self.lab_decoder(visit_state_baseline)
-        metab_recon_baseline = self.metab_decoder(visit_state_baseline)
-        
-        # ===== FOLLOW-UP VISIT =====
-        # Use Baseline Visit State as Past-State for Follow-up
-        past_state_followup = visit_state_baseline
-        
-        # Encode Follow-up visit based on mode
-        if mode == "full":
-            # Full mode: use both Baseline full data and Follow-up lab tests
-            followup_encodings = self.encode(
-                lab_tests=lab_tests_followup,
-                past_state=past_state_followup
+        # ===== LOOP THROUGH ALL VISITS =====
+        for visit_idx, (visit_data, missing_mask) in enumerate(zip(visits_data, missing_masks)):
+            # Process this visit
+            visit_state, reconstructions, alignment_loss, debug_info = self.process_visit(
+                visit_data, missing_mask, past_state
             )
-            z_lab_followup_mu, z_lab_followup_logvar = followup_encodings["lab"]
-            z_past_followup_mu, z_past_followup_logvar = followup_encodings["past"]
             
-            # Use Baseline metabolomics encoding for alignment
-            z_metab_followup_mu = z_metab_baseline_mu
-            z_metab_followup_logvar = z_metab_baseline_logvar
+            # Store outputs
+            all_reconstructions.append(reconstructions)
+            all_visit_states.append(visit_state)
+            all_alignment_losses.append(alignment_loss)
+            all_modality_dists.append(debug_info["modality_dists"])
+            all_past_dists.append(debug_info["past_dist"])
             
-        elif mode == "baseline_only":
-            # Baseline-only mode: use only Baseline full data
-            followup_encodings = self.encode(
-                past_state=past_state_followup
-            )
-            z_past_followup_mu, z_past_followup_logvar = followup_encodings["past"]
-            
-            # Use Baseline encodings
-            z_lab_followup_mu = z_lab_baseline_mu
-            z_lab_followup_logvar = z_lab_baseline_logvar
-            z_metab_followup_mu = z_metab_baseline_mu
-            z_metab_followup_logvar = z_metab_baseline_logvar
-            
-        elif mode == "followup_only":
-            # Follow-up-only mode: use only Follow-up lab tests
-            followup_encodings = self.encode(
-                lab_tests=lab_tests_followup,
-                past_state=past_state_followup
-            )
-            z_lab_followup_mu, z_lab_followup_logvar = followup_encodings["lab"]
-            z_past_followup_mu, z_past_followup_logvar = followup_encodings["past"]
-            
-            # Use Baseline metabolomics encoding for alignment (but not for fusion)
-            z_metab_followup_mu = z_metab_baseline_mu
-            z_metab_followup_logvar = z_metab_baseline_logvar
-            
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-        
-        # Align Follow-up distributions
-        alignment_loss_followup = align_distributions(
-            z_lab_followup_mu, z_lab_followup_logvar,
-            z_metab_followup_mu, z_metab_followup_logvar,
-            z_past_followup_mu, z_past_followup_logvar
-        )
-        
-        # Compute Follow-up Visit State
-        visit_state_followup = compute_visit_state(
-            z_lab_followup_mu,
-            z_metab_followup_mu,
-            z_past_followup_mu
-        )
-        
-        # Decode Follow-up visit
-        lab_recon_followup = self.lab_decoder(visit_state_followup)
-        metab_recon_followup = self.metab_decoder(visit_state_followup)
+            # Update Past-State for next visit
+            past_state = visit_state
         
         # ===== COMPUTE LOSSES =====
-        # Reconstruction losses (only for available data)
-        lab_recon_loss = reconstruction_loss(
-            lab_recon_baseline, lab_tests_baseline
-        ) + reconstruction_loss(
-            lab_recon_followup, lab_tests_followup
+        losses = self.compute_losses(
+            visits_data=visits_data,
+            missing_masks=missing_masks,
+            all_reconstructions=all_reconstructions,
+            all_modality_dists=all_modality_dists,
+            all_past_dists=all_past_dists,
+            all_alignment_losses=all_alignment_losses,
+            kl_annealing_weight=kl_annealing_weight,
+            recon_targets=recon_targets,
         )
         
-        metab_recon_loss = reconstruction_loss(
-            metab_recon_baseline, metabolomics_baseline
-        )
-        if metabolomics_followup is not None:
-            metab_recon_loss += reconstruction_loss(
-                metab_recon_followup, metabolomics_followup
-            )
+        # Prepare output
+        output = {
+            "reconstructions": all_reconstructions,
+            "losses": losses
+        }
         
-        # KL divergence losses
-        lab_kl_loss = kl_divergence_loss(z_lab_baseline_mu, z_lab_baseline_logvar)
-        if mode != "baseline_only":
-            lab_kl_loss += kl_divergence_loss(z_lab_followup_mu, z_lab_followup_logvar)
+        if return_all_visit_states:
+            output["visit_states"] = all_visit_states
         
-        metab_kl_loss = kl_divergence_loss(z_metab_baseline_mu, z_metab_baseline_logvar)
-        past_kl_loss = kl_divergence_loss(z_past_baseline_mu, z_past_baseline_logvar)
-        past_kl_loss += kl_divergence_loss(z_past_followup_mu, z_past_followup_logvar)
+        return output
+    
+    def compute_losses(
+        self,
+        visits_data: List[Dict[str, torch.Tensor]],
+        missing_masks: List[Dict[str, int]],
+        all_reconstructions: List[Dict[str, torch.Tensor]],
+        all_modality_dists: List[Dict[str, Tuple[torch.Tensor, torch.Tensor]]],
+        all_past_dists: List[Tuple[torch.Tensor, torch.Tensor]],
+        all_alignment_losses: List[torch.Tensor],
+        kl_annealing_weight: float,
+        recon_targets: Optional[List[Dict[str, torch.Tensor]]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute all losses with proper handling of missing modalities.
         
-        # Alignment loss
-        alignment_loss = alignment_loss_baseline + alignment_loss_followup
+        Reconstruction loss:
+            - If recon_targets is provided (active-mask training), computed for
+              modalities with mask 0 or 1 (available or actively masked) where
+              recon_targets provide a target (mask 2 is naturally missing and
+              does not contribute).
+            - If recon_targets is None, computed only for modalities with mask 0
+              and non-None inputs in visits_data (backward-compatible behavior).
+        KL loss: Only computed for modalities that were encoded (not missing)
+        Alignment loss: Already computed to exclude missing modalities
+        Adversarial loss: Computed on all reconstructions
+        """
+        device = list(visits_data[0].values())[0].device
         
-        # Adversarial loss (only for metabolomics)
-        if metabolomics_followup is not None:
-            # Use real follow-up metabolomics
-            real_metab = metabolomics_followup
-        else:
-            # Use baseline metabolomics as proxy for real data
-            real_metab = metabolomics_baseline
+        # Reconstruction losses per modality
+        recon_losses = {mod_name: 0.0 for mod_name in self.modality_dims.keys()}
         
+        # KL losses per encoder
+        kl_losses = {mod_name: 0.0 for mod_name in self.modality_dims.keys()}
+        kl_losses["past"] = 0.0
+        
+        # Track counts for averaging
+        recon_counts = {mod_name: 0 for mod_name in self.modality_dims.keys()}
+        kl_counts = {mod_name: 0 for mod_name in self.modality_dims.keys()}
+        kl_counts["past"] = 0
+        
+        # Process each visit
+        for visit_idx, (visit_data, missing_mask, reconstructions, modality_dists, past_dist) in enumerate(
+            zip(visits_data, missing_masks, all_reconstructions, all_modality_dists, all_past_dists)
+        ):
+            # Reconstruction losses
+            for mod_name in self.modality_dims.keys():
+                mask_value = missing_mask.get(mod_name, 2)
+                if recon_targets is not None:
+                    # Active-mask training: supervise for mask 0 and 1 when target exists
+                    target_dict = recon_targets[visit_idx]
+                    target = target_dict.get(mod_name)
+                    if mask_value in (0, 1) and target is not None:
+                        recon = reconstructions[mod_name]
+                        loss = reconstruction_loss(recon, target)
+                        recon_losses[mod_name] += loss
+                        recon_counts[mod_name] += 1
+                else:
+                    # Legacy behavior: supervise only for mask 0 and non-None input
+                    target = visit_data.get(mod_name)
+                    if mask_value == 0 and target is not None:
+                        recon = reconstructions[mod_name]
+                        loss = reconstruction_loss(recon, target)
+                        recon_losses[mod_name] += loss
+                        recon_counts[mod_name] += 1
+            
+            # KL losses - only for modalities that were encoded
+            for mod_name, (mu, logvar) in modality_dists.items():
+                kl_losses[mod_name] += kl_divergence_loss(mu, logvar)
+                kl_counts[mod_name] += 1
+            
+            # Past-State KL loss
+            past_mu, past_logvar = past_dist
+            kl_losses["past"] += kl_divergence_loss(past_mu, past_logvar)
+            kl_counts["past"] += 1
+        
+        # Average losses over visits
+        for mod_name in recon_losses.keys():
+            if recon_counts[mod_name] > 0:
+                recon_losses[mod_name] = recon_losses[mod_name] / recon_counts[mod_name]
+            else:
+                recon_losses[mod_name] = torch.tensor(0.0, device=device)
+        
+        for mod_name in kl_losses.keys():
+            if kl_counts[mod_name] > 0:
+                kl_losses[mod_name] = kl_losses[mod_name] / kl_counts[mod_name]
+            else:
+                kl_losses[mod_name] = torch.tensor(0.0, device=device)
+        
+        # Sum alignment losses
+        alignment_loss = sum(all_alignment_losses) / len(all_alignment_losses)
+        
+        # Adversarial loss (use last visit's reconstructions)
+        last_recon = all_reconstructions[-1]
+        primary_modality = list(self.modality_dims.keys())[0]
         adversarial_loss = adversarial_loss_generator(
-            self.discriminator,
-            metab_recon_followup
+            self.discriminator, last_recon[primary_modality]
         )
         
         # Total loss
-        losses = compute_total_loss(
-            lab_recon_loss=lab_recon_loss,
-            metab_recon_loss=metab_recon_loss,
-            lab_kl_loss=lab_kl_loss,
-            metab_kl_loss=metab_kl_loss,
-            past_kl_loss=past_kl_loss,
+        total_loss_dict = compute_total_loss(
+            recon_losses=recon_losses,
+            kl_losses=kl_losses,
             alignment_loss=alignment_loss,
             adversarial_loss=adversarial_loss,
             lambda_kl=self.lambda_kl,
@@ -306,17 +430,45 @@ class PEAGModel(nn.Module):
             kl_annealing_weight=kl_annealing_weight
         )
         
-        # Prepare output
-        output = {
-            "lab_recon_baseline": lab_recon_baseline,
-            "metab_recon_baseline": metab_recon_baseline,
-            "lab_recon_followup": lab_recon_followup,
-            "metab_recon_followup": metab_recon_followup,
-            "losses": losses
-        }
+        return total_loss_dict
+    
+    def impute_missing(
+        self,
+        visits_data: List[Dict[str, torch.Tensor]],
+        missing_masks: List[Dict[str, int]]
+    ) -> List[Dict[str, torch.Tensor]]:
+        """
+        Impute missing modalities for all visits.
         
-        if return_visit_state:
-            output["visit_state_followup"] = visit_state_followup
+        Args:
+            visits_data: List of visit data dictionaries
+            missing_masks: List of missing mask dictionaries
         
-        return output
-
+        Returns:
+            List of dictionaries containing imputed data for all modalities
+        """
+        with torch.no_grad():
+            output = self.forward(
+                visits_data=visits_data,
+                missing_masks=missing_masks,
+                kl_annealing_weight=1.0,
+                return_all_visit_states=False,
+            )
+        
+        # Return reconstructions as imputed values
+        imputed_data = []
+        for visit_idx, (visit_data, missing_mask, reconstructions) in enumerate(
+            zip(visits_data, missing_masks, output["reconstructions"])
+        ):
+            imputed_visit = {}
+            for mod_name in self.modality_dims.keys():
+                mask_value = missing_mask.get(mod_name, 0)
+                if mask_value == 2 or visit_data.get(mod_name) is None:
+                    # Naturally missing (or no original data) - use imputed value
+                    imputed_visit[mod_name] = reconstructions[mod_name]
+                else:
+                    # Available modality - keep original value
+                    imputed_visit[mod_name] = visit_data[mod_name]
+            imputed_data.append(imputed_visit)
+        
+        return imputed_data

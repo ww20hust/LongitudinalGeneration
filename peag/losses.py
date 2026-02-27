@@ -1,98 +1,96 @@
 """
 Loss functions for PEAG framework.
 
-This module implements all loss components: reconstruction loss, KL divergence,
-alignment penalty, and adversarial loss.
-
-Reference: Methods section - Variational Inference and Objective Function
+This module implements all loss components including reconstruction loss,
+KL divergence, alignment penalty, and adversarial loss.
 """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from peag.utils.distributions import kl_divergence_standard_normal
-from peag.core.alignment import align_distributions
+from typing import Dict, Optional
 
 
 def reconstruction_loss(
-    pred: torch.Tensor,
+    recon: torch.Tensor,
     target: torch.Tensor,
-    mask: torch.Tensor = None
+    mask: Optional[torch.Tensor] = None,
+    loss_type: str = "mse"
 ) -> torch.Tensor:
     """
-    Compute reconstruction loss (Mean Squared Error).
-    
-    Applied only to data points with ground-truth measurements.
-    
-    Reference: Methods section - Reconstruction Loss
+    Compute reconstruction loss.
     
     Args:
-        pred: Predicted values of shape (batch_size, feature_dim)
-        target: Ground-truth values of shape (batch_size, feature_dim)
-        mask: Binary mask indicating available measurements (batch_size, feature_dim).
-              If None, all points are considered available.
+        recon: Reconstructed data
+        target: Target data
+        mask: Optional mask for missing values (1 = valid, 0 = missing)
+        loss_type: Type of loss ("mse" or "mae")
     
     Returns:
-        Mean squared error loss
+        Reconstruction loss
     """
-    if mask is not None:
-        # Only compute loss for available measurements
-        mse = (pred - target).pow(2) * mask
-        loss = mse.sum() / mask.sum()
+    if loss_type == "mse":
+        loss = F.mse_loss(recon, target, reduction='none')
+    elif loss_type == "mae":
+        loss = F.l1_loss(recon, target, reduction='none')
     else:
-        loss = F.mse_loss(pred, target)
+        raise ValueError(f"Unknown loss type: {loss_type}")
     
-    return loss
+    if mask is not None:
+        # Apply mask and compute mean over valid values
+        loss = loss * mask
+        return loss.sum() / (mask.sum() + 1e-8)
+    else:
+        return loss.mean()
 
 
-def kl_divergence_loss(
-    mu: torch.Tensor,
-    logvar: torch.Tensor
-) -> torch.Tensor:
+def kl_divergence_loss(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """
-    Compute KL divergence loss between latent distribution and standard normal prior.
+    Compute KL divergence loss for VAE.
     
-    Reference: Methods section - Variational Inference and Objective Function
+    KL(N(mu, sigma) || N(0, 1)) = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     
     Args:
-        mu: Mean vector of shape (batch_size, latent_dim)
-        logvar: Log variance vector of shape (batch_size, latent_dim)
+        mu: Mean of latent distribution
+        logvar: Log variance of latent distribution
     
     Returns:
         KL divergence loss
     """
-    return kl_divergence_standard_normal(mu, logvar)
+    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=-1)
+    return kl.mean()
 
 
-def alignment_penalty_loss(
-    z_lab_mu: torch.Tensor,
-    z_lab_logvar: torch.Tensor,
-    z_metab_mu: torch.Tensor,
-    z_metab_logvar: torch.Tensor,
-    z_past_mu: torch.Tensor,
-    z_past_logvar: torch.Tensor
-) -> torch.Tensor:
+def alignment_penalty_loss(alignment_loss: torch.Tensor) -> torch.Tensor:
     """
-    Compute alignment penalty using Jeffrey divergence.
-    
-    Reference: Methods section - Alignment Penalty
+    Alignment penalty loss.
     
     Args:
-        z_lab_mu: Lab tests encoder mean (batch_size, latent_dim)
-        z_lab_logvar: Lab tests encoder log variance (batch_size, latent_dim)
-        z_metab_mu: Metabolomics encoder mean (batch_size, latent_dim)
-        z_metab_logvar: Metabolomics encoder log variance (batch_size, latent_dim)
-        z_past_mu: Past-State encoder mean (batch_size, latent_dim)
-        z_past_logvar: Past-State encoder log variance (batch_size, latent_dim)
+        alignment_loss: Alignment loss from alignment module
     
     Returns:
-        Alignment penalty loss
+        Alignment penalty
     """
-    return align_distributions(
-        z_lab_mu, z_lab_logvar,
-        z_metab_mu, z_metab_logvar,
-        z_past_mu, z_past_logvar
-    )
+    return alignment_loss
+
+
+def adversarial_loss_generator(
+    discriminator: nn.Module,
+    fake_data: torch.Tensor
+) -> torch.Tensor:
+    """
+    Adversarial loss for generator (to fool discriminator).
+    
+    Args:
+        discriminator: Discriminator network
+        fake_data: Generated data
+    
+    Returns:
+        Adversarial loss
+    """
+    fake_pred = discriminator(fake_data)
+    # Generator wants discriminator to predict 1 (real) for fake data
+    loss = -torch.mean(torch.log(fake_pred + 1e-8))
+    return loss
 
 
 def adversarial_loss_discriminator(
@@ -101,127 +99,72 @@ def adversarial_loss_discriminator(
     fake_data: torch.Tensor
 ) -> torch.Tensor:
     """
-    Compute discriminator loss for adversarial training.
-    
-    The discriminator is trained to distinguish real (fully measured) data
-    from fake (imputed) data.
-    
-    Reference: Methods section - Missingness Adversarial Training
+    Adversarial loss for discriminator.
     
     Args:
-        discriminator: MissingnessDiscriminator instance
-        real_data: Real (fully measured) data of shape (batch_size, feature_dim)
-        fake_data: Fake (imputed) data of shape (batch_size, feature_dim)
+        discriminator: Discriminator network
+        real_data: Real data
+        fake_data: Generated (fake) data
     
     Returns:
-        Discriminator loss (binary cross-entropy)
+        Discriminator loss
     """
-    # Real data should be classified as 1
     real_pred = discriminator(real_data)
-    real_loss = F.binary_cross_entropy(real_pred, torch.ones_like(real_pred))
+    fake_pred = discriminator(fake_data.detach())
     
-    # Fake data should be classified as 0
-    fake_pred = discriminator(fake_data)
-    fake_loss = F.binary_cross_entropy(fake_pred, torch.zeros_like(fake_pred))
+    # Discriminator wants to predict 1 for real and 0 for fake
+    real_loss = -torch.mean(torch.log(real_pred + 1e-8))
+    fake_loss = -torch.mean(torch.log(1 - fake_pred + 1e-8))
     
-    # Total discriminator loss
-    disc_loss = (real_loss + fake_loss) / 2.0
-    
-    return disc_loss
-
-
-def adversarial_loss_generator(
-    discriminator: nn.Module,
-    fake_data: torch.Tensor
-) -> torch.Tensor:
-    """
-    Compute generator loss for adversarial training.
-    
-    The generator (decoder) is trained to confuse the discriminator by making
-    imputed data indistinguishable from real data.
-    
-    Reference: Methods section - Missingness Adversarial Training
-    
-    Args:
-        discriminator: MissingnessDiscriminator instance
-        fake_data: Fake (imputed) data of shape (batch_size, feature_dim)
-    
-    Returns:
-        Generator loss (binary cross-entropy, trying to fool discriminator)
-    """
-    # Generator wants discriminator to classify fake as real (1)
-    fake_pred = discriminator(fake_data)
-    gen_loss = F.binary_cross_entropy(fake_pred, torch.ones_like(fake_pred))
-    
-    return gen_loss
+    return real_loss + fake_loss
 
 
 def compute_total_loss(
-    # Reconstruction losses
-    lab_recon_loss: torch.Tensor,
-    metab_recon_loss: torch.Tensor,
-    # KL divergences
-    lab_kl_loss: torch.Tensor,
-    metab_kl_loss: torch.Tensor,
-    past_kl_loss: torch.Tensor,
-    # Alignment penalty
+    recon_losses: Dict[str, torch.Tensor],
+    kl_losses: Dict[str, torch.Tensor],
     alignment_loss: torch.Tensor,
-    # Adversarial loss
-    adversarial_loss: torch.Tensor,
-    # Loss weights
+    adversarial_loss: Optional[torch.Tensor] = None,
     lambda_kl: float = 1.0,
     lambda_align: float = 1.0,
     lambda_adv: float = 1.0,
-    # KL annealing weight
     kl_annealing_weight: float = 1.0
-) -> dict[str, torch.Tensor]:
+) -> Dict[str, torch.Tensor]:
     """
-    Compute total loss from all components.
-    
-    Formula: L_total = L_recon + λ_KL * L_KL + λ_align * L_align + λ_adv * L_adv
-    
-    Reference: Methods section - Total Loss
+    Compute total loss as weighted sum of all components.
     
     Args:
-        lab_recon_loss: Lab tests reconstruction loss
-        metab_recon_loss: Metabolomics reconstruction loss
-        lab_kl_loss: Lab tests encoder KL divergence
-        metab_kl_loss: Metabolomics encoder KL divergence
-        past_kl_loss: Past-State encoder KL divergence
+        recon_losses: Dictionary of reconstruction losses per modality
+        kl_losses: Dictionary of KL divergence losses per encoder
         alignment_loss: Alignment penalty loss
-        adversarial_loss: Adversarial loss (generator)
-        lambda_kl: Weight for KL divergence term
-        lambda_align: Weight for alignment penalty term
-        lambda_adv: Weight for adversarial loss term
-        kl_annealing_weight: KL annealing weight (0 to 1) for gradual KL increase
+        adversarial_loss: Adversarial loss (optional)
+        lambda_kl: Weight for KL divergence
+        lambda_align: Weight for alignment
+        lambda_adv: Weight for adversarial loss
+        kl_annealing_weight: Annealing weight for KL (0 to 1)
     
     Returns:
         Dictionary containing total loss and individual components
     """
-    # Total reconstruction loss
-    recon_loss = lab_recon_loss + metab_recon_loss
+    # Sum reconstruction losses
+    total_recon_loss = sum(recon_losses.values())
     
-    # Total KL divergence (with annealing)
-    total_kl = (lab_kl_loss + metab_kl_loss + past_kl_loss) * kl_annealing_weight
+    # Sum KL losses
+    total_kl_loss = sum(kl_losses.values())
     
     # Total loss
-    total_loss = (
-        recon_loss +
-        lambda_kl * total_kl +
-        lambda_align * alignment_loss +
-        lambda_adv * adversarial_loss
-    )
+    total_loss = total_recon_loss + \
+                 lambda_kl * kl_annealing_weight * total_kl_loss + \
+                 lambda_align * alignment_loss
+    
+    if adversarial_loss is not None:
+        total_loss += lambda_adv * adversarial_loss
     
     return {
         "total_loss": total_loss,
-        "reconstruction_loss": recon_loss,
-        "kl_loss": total_kl,
+        "recon_loss": total_recon_loss,
+        "kl_loss": total_kl_loss,
         "alignment_loss": alignment_loss,
-        "adversarial_loss": adversarial_loss,
-        "lab_recon_loss": lab_recon_loss,
-        "metab_recon_loss": metab_recon_loss,
-        "lab_kl_loss": lab_kl_loss,
-        "metab_kl_loss": metab_kl_loss,
-        "past_kl_loss": past_kl_loss,
+        "adversarial_loss": adversarial_loss if adversarial_loss is not None else torch.tensor(0.0),
+        **{f"recon_{k}": v for k, v in recon_losses.items()},
+        **{f"kl_{k}": v for k, v in kl_losses.items()}
     }
-

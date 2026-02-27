@@ -1,13 +1,25 @@
 """
 PEAG: Patient-context Enhanced Longitudinal Multimodal Alignment and Generation Framework
 
-A framework for imputing missing modalities in longitudinal clinical data by leveraging
-patient historical context and multimodal alignment.
+An enhanced framework for longitudinal multimodal clinical data imputation
+with support for multiple visits and missing modalities.
 """
 
-__version__ = "0.1.0"
-
 from peag.model import PEAGModel
+from peag.losses import (
+    reconstruction_loss,
+    kl_divergence_loss,
+    adversarial_loss_generator,
+    adversarial_loss_discriminator,
+    compute_total_loss
+)
 
-__all__ = ["PEAGModel"]
-
+__version__ = "2.0.0"
+__all__ = [
+    "PEAGModel",
+    "reconstruction_loss",
+    "kl_divergence_loss",
+    "adversarial_loss_generator",
+    "adversarial_loss_discriminator",
+    "compute_total_loss"
+]

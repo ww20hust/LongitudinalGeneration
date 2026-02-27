@@ -1,83 +1,108 @@
-# PEAG: Patient-context Enhanced Longitudinal Multimodal Alignment and Generation Framework
+# PEAG
 
-## Overview
+Patient-context Enhanced Longitudinal Multimodal Alignment and Generation — a deep learning framework for longitudinal multimodal clinical data with multiple visits and missing modalities.
 
-PEAG is a deep learning framework for longitudinal multimodal clinical data imputation. It leverages patient historical state (Past-State) to enhance multimodal alignment and generation for the current visit, enabling accurate imputation of missing modalities from sparse measurements.
+## Features
 
-## Key Features
-
-- **Longitudinal Context Integration**: Explicitly encodes personalized past state to enhance current visit multimodal alignment
-- **Variational Autoencoder Architecture**: Based on VAE with recurrent neural network structure for sequential clinical visits
-- **Multimodal Alignment**: Uses Jeffrey divergence to align modality-specific latent representations
-- **Adversarial Training**: Prevents generated data from revealing missingness patterns
-- **Flexible Ablation Modes**: Supports full, baseline-only, and follow-up-only modes
+- **Multi-visit processing** — Loop over arbitrary visits; visit state feeds into the next as past state.
+- **Missing modalities** — Mask-based: `0` = available, `1` = actively masked (training), `2` = naturally missing. Only available modalities are encoded and used in alignment/fusion.
+- **Supervised imputation** — Reconstruction loss on available (and actively masked) modalities; missing modalities are imputed from the fused visit state.
 
 ## Installation
-
-```bash
-pip install -r requirements.txt
-```
-
-Or install as a package:
 
 ```bash
 pip install -e .
 ```
 
+Requires Python ≥3.8, PyTorch ≥1.9, NumPy, and optionally `tqdm`.
+
 ## Quick Start
 
-### Basic Usage
-
 ```python
+import torch
+from torch.utils.data import DataLoader
 from peag.model import PEAGModel
-from peag.data import LongitudinalDataset
-from peag.training import Trainer
+from peag.data.dataset import create_synthetic_data, LongitudinalDataset, collate_visits
+from peag.training.trainer import Trainer
 
-# Load data
-dataset = LongitudinalDataset(baseline_data, followup_data)
+modality_dims = {"lab": 61, "metab": 251}
+model = PEAGModel(modality_dims=modality_dims, latent_dim=16, hidden_dim=128)
 
-# Initialize model
-model = PEAGModel(
-    lab_test_dim=61,
-    metabolomics_dim=251,
-    latent_dim=16
+patient_ids, visits_data, missing_masks = create_synthetic_data(
+    n_patients=100, n_visits=3, modality_dims=modality_dims, missing_rate=0.3
 )
+dataset = LongitudinalDataset(patient_ids, visits_data, missing_masks)
+dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_visits)
 
-# Train model
-trainer = Trainer(model, dataset)
-trainer.train()
-
-# Evaluate
-results = trainer.evaluate(test_dataset)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+trainer = Trainer(model, optimizer)
+history = trainer.train(dataloader, n_epochs=50)
 ```
 
-## Architecture
+**Imputation (inference):**
 
-PEAG processes longitudinal clinical visits as follows:
+```python
+imputed = model.impute_missing(visits_data, missing_masks)
+# imputed[visit_idx][mod_name] is imputed when mask was 2 or data was None
+```
 
-1. **Encoding**: Each modality (lab tests, metabolomics) and Past-State are encoded into 16-dimensional latent distributions
-2. **Alignment**: Jeffrey divergence aligns the modality-specific latent representations
-3. **Fusion**: Visit State is computed as the mean of aligned distributions
-4. **Decoding**: All modalities are reconstructed from the fused Visit State
-5. **Recurrence**: Visit State becomes the Past-State for the next visit
+## Scripts
+
+**Train** (synthetic data, optional active masking and checkpoint saving):
+
+```bash
+python scripts/train.py --n_patients 100 --n_visits 3 --epochs 10 --save_dir ./ckpts
+```
+
+**Inference** (load checkpoint and run imputation):
+
+```bash
+python scripts/inference.py --checkpoint ./ckpts/checkpoint_epoch_10.pt
+```
 
 ## Data Format
 
-The framework expects paired Baseline and Follow-up visit data:
-- **Baseline Visit**: Fully paired lab tests (61 features) and metabolomics (251 features)
-- **Follow-up Visit**: Lab tests (61 features) available, metabolomics to be imputed
+- **visits_data**: `List[Dict[str, Tensor]]` — one dict per visit; keys = modality names, value = `(batch, dim)` or `None` if missing.
+- **missing_masks**: `List[Dict[str, int]]` — same length; `0` = available, `1` = actively masked, `2` = naturally missing.
 
-## Evaluation Metrics
+Example: one patient, three visits, metabolomics missing at visit 2:
 
-- Pearson correlation coefficient (r)
-- Mean Absolute Error (MAE)
-- Mean Squared Error (MSE)
+```python
+visits_data = [
+    {"lab": lab_t1, "metab": metab_t1},
+    {"lab": lab_t2, "metab": None},
+    {"lab": lab_t3, "metab": metab_t3},
+]
+missing_masks = [
+    {"lab": 0, "metab": 0},
+    {"lab": 0, "metab": 2},
+    {"lab": 0, "metab": 0},
+]
+```
 
-## Citation
+## Model Overview
 
-If you use this framework, please cite the original paper.
+For each visit:
+
+1. Encode available modalities (skip where mask ≠ 0 or data is `None`).
+2. Encode past state (zeros at first visit).
+3. Align available modality distributions (pairwise Jeffrey divergence) and fuse with past state.
+4. Visit state = mean of available modality means and past-state mean.
+5. Decode all modalities from visit state; set past state = visit state for next visit.
+
+**Losses:** reconstruction (on available/actively masked with targets), KL (on encoded modalities + past), alignment (on available only), optional adversarial on reconstructions.
+
+## API Summary
+
+| Component | Description |
+|-----------|-------------|
+| `PEAGModel(modality_dims, latent_dim=16, hidden_dim=128, lambda_kl, lambda_align, lambda_adv)` | Main model |
+| `model.forward(visits_data, missing_masks, kl_annealing_weight=1.0, recon_targets=None)` | Returns `reconstructions`, `losses` |
+| `model.impute_missing(visits_data, missing_masks)` | Returns list of per-visit dicts (imputed where missing) |
+| `LongitudinalDataset(patient_ids, visits_data, missing_masks, min_completeness_ratio, train_mask_rate)` | Dataset with optional filtering and active masking |
+| `create_synthetic_data(n_patients, n_visits, modality_dims, missing_rate, seed)` | Synthetic longitudinal data |
+| `Trainer(model, optimizer).train(dataloader, n_epochs, save_dir, validate_every)` | Training loop with KL annealing |
 
 ## License
 
-[Specify license]
-
+MIT

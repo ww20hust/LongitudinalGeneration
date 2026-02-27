@@ -1,393 +1,176 @@
 """
-Trainer for PEAG framework.
-
-This module implements the training loop with ELBO optimization, KL annealing,
-early stopping, and checkpoint management.
-
-Reference: Methods section - Training Implementation Details
+Training utilities for PEAG framework.
 """
-
-import os
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-import numpy as np
-
-from peag.model import PEAGModel
-from peag.training.config import TrainingConfig
-from peag.losses import adversarial_loss_discriminator
+from typing import Dict, List, Optional, Any
+import os
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 
 class Trainer:
     """
-    Trainer class for PEAG model.
-    
-    Implements:
-    - ELBO optimization
-    - KL annealing (linear increase from 0 to 1 over first 50 epochs)
-    - Early stopping (stops if validation loss doesn't improve for 50 epochs)
-    - Checkpoint management
+    Trainer for PEAG model.
     """
     
     def __init__(
         self,
-        model: PEAGModel,
-        train_dataset: torch.utils.data.Dataset,
-        val_dataset: torch.utils.data.Dataset = None,
-        config: TrainingConfig = None
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        kl_anneal_epochs: int = 50
     ):
-        """
-        Initialize trainer.
-        
-        Args:
-            model: PEAGModel instance
-            train_dataset: Training dataset
-            val_dataset: Validation dataset (optional, will split from train if None)
-            config: Training configuration (uses default if None)
-        """
-        self.model = model
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
-        self.config = config or TrainingConfig()
-        
-        # Move model to device
-        self.device = torch.device(self.config.device)
-        self.model.to(self.device)
-        
-        # Create data loaders
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=0
-        )
-        
-        if val_dataset is not None:
-            self.val_loader = DataLoader(
-                val_dataset,
-                batch_size=self.config.batch_size,
-                shuffle=False,
-                num_workers=0
-            )
-        else:
-            self.val_loader = None
-        
-        # Optimizers
-        # Main model optimizer (encoders, decoders)
-        model_params = [
-            p for n, p in self.model.named_parameters()
-            if "discriminator" not in n
-        ]
-        self.optimizer = optim.AdamW(
-            model_params,
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay
-        )
-        
-        # Discriminator optimizer
-        disc_params = [
-            p for n, p in self.model.named_parameters()
-            if "discriminator" in n
-        ]
-        self.disc_optimizer = optim.AdamW(
-            disc_params,
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay
-        )
-        
-        # Training state
+        self.model = model.to(device)
+        self.optimizer = optimizer
+        self.device = device
+        self.kl_anneal_epochs = kl_anneal_epochs
         self.current_epoch = 0
-        self.best_val_loss = float('inf')
-        self.patience_counter = 0
-        self.training_history = {
-            "train_loss": [],
-            "val_loss": [],
-            "train_recon_loss": [],
-            "val_recon_loss": []
-        }
-        
-        # Create checkpoint directory
-        os.makedirs(self.config.save_dir, exist_ok=True)
     
-    def compute_kl_annealing_weight(self, epoch: int) -> float:
-        """
-        Compute KL annealing weight for current epoch.
-        
-        Linear increase from 0 to 1 over first kl_annealing_epochs epochs.
-        
-        Reference: Methods section - Training Implementation Details
-        
-        Args:
-            epoch: Current epoch number
-        
-        Returns:
-            KL annealing weight (0 to 1)
-        """
-        if epoch < self.config.kl_annealing_epochs:
-            return epoch / self.config.kl_annealing_epochs
-        else:
+    def compute_kl_annealing_weight(self) -> float:
+        """Compute KL annealing weight (linear increase from 0 to 1)."""
+        if self.kl_anneal_epochs <= 0:
             return 1.0
+        return min(1.0, self.current_epoch / self.kl_anneal_epochs)
     
-    def train_epoch(self, epoch: int) -> dict[str, float]:
-        """
-        Train for one epoch.
-        
-        Args:
-            epoch: Current epoch number
-        
-        Returns:
-            Dictionary of average losses for the epoch
-        """
+    def train_epoch(self, dataloader: DataLoader) -> Dict[str, float]:
+        """Train for one epoch."""
         self.model.train()
-        
-        kl_weight = self.compute_kl_annealing_weight(epoch)
-        
-        total_losses = {
+        epoch_losses = {
             "total_loss": 0.0,
-            "reconstruction_loss": 0.0,
-            "kl_loss": 0.0,
-            "alignment_loss": 0.0,
-            "adversarial_loss": 0.0,
-            "discriminator_loss": 0.0
-        }
-        
-        n_batches = 0
-        
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config.max_epochs}")
-        
-        for batch in pbar:
-            # Move batch to device
-            baseline_lab = batch["baseline_lab_tests"].to(self.device)
-            baseline_metab = batch["baseline_metabolomics"].to(self.device)
-            followup_lab = batch["followup_lab_tests"].to(self.device)
-            followup_metab = batch.get("followup_metabolomics")
-            if followup_metab is not None:
-                followup_metab = followup_metab.to(self.device)
-            
-            # ===== TRAIN DISCRIMINATOR =====
-            self.disc_optimizer.zero_grad()
-            
-            # Forward pass
-            with torch.no_grad():
-                output = self.model(
-                    baseline_lab, baseline_metab,
-                    followup_lab, followup_metab,
-                    mode="full",
-                    kl_annealing_weight=kl_weight
-                )
-            
-            # Discriminator loss
-            real_metab = followup_metab if followup_metab is not None else baseline_metab
-            fake_metab = output["metab_recon_followup"]
-            
-            disc_loss = adversarial_loss_discriminator(
-                self.model.discriminator,
-                real_metab,
-                fake_metab.detach()
-            )
-            
-            disc_loss.backward()
-            self.disc_optimizer.step()
-            
-            # ===== TRAIN MAIN MODEL =====
-            self.optimizer.zero_grad()
-            
-            # Forward pass
-            output = self.model(
-                baseline_lab, baseline_metab,
-                followup_lab, followup_metab,
-                mode="full",
-                kl_annealing_weight=kl_weight
-            )
-            
-            losses = output["losses"]
-            total_loss = losses["total_loss"]
-            
-            # Backward pass
-            total_loss.backward()
-            self.optimizer.step()
-            
-            # Accumulate losses
-            total_losses["total_loss"] += total_loss.item()
-            total_losses["reconstruction_loss"] += losses["reconstruction_loss"].item()
-            total_losses["kl_loss"] += losses["kl_loss"].item()
-            total_losses["alignment_loss"] += losses["alignment_loss"].item()
-            total_losses["adversarial_loss"] += losses["adversarial_loss"].item()
-            total_losses["discriminator_loss"] += disc_loss.item()
-            
-            n_batches += 1
-            
-            # Update progress bar
-            pbar.set_postfix({
-                "loss": total_loss.item(),
-                "recon": losses["reconstruction_loss"].item(),
-                "kl": losses["kl_loss"].item()
-            })
-        
-        # Average losses
-        avg_losses = {k: v / n_batches for k, v in total_losses.items()}
-        
-        return avg_losses
-    
-    def validate(self) -> dict[str, float]:
-        """
-        Validate on validation set.
-        
-        Returns:
-            Dictionary of average validation losses
-        """
-        if self.val_loader is None:
-            return {}
-        
-        self.model.eval()
-        
-        total_losses = {
-            "total_loss": 0.0,
-            "reconstruction_loss": 0.0,
+            "recon_loss": 0.0,
             "kl_loss": 0.0,
             "alignment_loss": 0.0,
             "adversarial_loss": 0.0
         }
+        num_batches = 0
+        kl_weight = self.compute_kl_annealing_weight()
+        use_active_mask = getattr(dataloader.dataset, "train_mask_rate", None) is not None
         
-        n_batches = 0
+        for batch in tqdm(dataloader, desc=f"Epoch {self.current_epoch}"):
+            patient_ids, visits_list, masks_list = batch
+            
+            # Move data to device
+            visits_list_device = []
+            for visits in visits_list:
+                visits_device = []
+                for visit in visits:
+                    visit_device = {
+                        k: v.to(self.device) if v is not None else None
+                        for k, v in visit.items()
+                    }
+                    visits_device.append(visit_device)
+                visits_list_device.append(visits_device)
+            
+            # Forward pass for each patient
+            batch_losses = []
+            batch_outputs = []
+            for visits, masks in zip(visits_list_device, masks_list):
+                if use_active_mask:
+                    # Build masked input: None where mask is 1 (actively masked) or 2 (naturally missing)
+                    visits_masked: List[Dict[str, torch.Tensor]] = []
+                    for visit_data, visit_mask in zip(visits, masks):
+                        masked_visit: Dict[str, torch.Tensor] = {}
+                        for mod_name, tensor in visit_data.items():
+                            mask_value = visit_mask.get(mod_name, 2)
+                            if mask_value in (1, 2):
+                                masked_visit[mod_name] = None
+                            else:
+                                masked_visit[mod_name] = tensor
+                        visits_masked.append(masked_visit)
+                    
+                    output = self.model(
+                        visits_data=visits_masked,
+                        missing_masks=masks,
+                        kl_annealing_weight=kl_weight,
+                        recon_targets=visits,
+                    )
+                else:
+                    output = self.model(
+                        visits_data=visits,
+                        missing_masks=masks,
+                        kl_annealing_weight=kl_weight,
+                    )
+                batch_losses.append(output["losses"]["total_loss"])
+                batch_outputs.append(output)
+            
+            # Average loss over batch
+            loss = torch.stack(batch_losses).mean()
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            
+            # Accumulate losses from this batch
+            for output in batch_outputs:
+                for key in epoch_losses.keys():
+                    if key in output["losses"]:
+                        epoch_losses[key] += output["losses"][key].item()
+            
+            num_batches += len(batch_outputs)
         
-        with torch.no_grad():
-            for batch in self.val_loader:
-                baseline_lab = batch["baseline_lab_tests"].to(self.device)
-                baseline_metab = batch["baseline_metabolomics"].to(self.device)
-                followup_lab = batch["followup_lab_tests"].to(self.device)
-                followup_metab = batch.get("followup_metabolomics")
-                if followup_metab is not None:
-                    followup_metab = followup_metab.to(self.device)
-                
-                output = self.model(
-                    baseline_lab, baseline_metab,
-                    followup_lab, followup_metab,
-                    mode="full",
-                    kl_annealing_weight=1.0  # No annealing for validation
-                )
-                
-                losses = output["losses"]
-                
-                total_losses["total_loss"] += losses["total_loss"].item()
-                total_losses["reconstruction_loss"] += losses["reconstruction_loss"].item()
-                total_losses["kl_loss"] += losses["kl_loss"].item()
-                total_losses["alignment_loss"] += losses["alignment_loss"].item()
-                total_losses["adversarial_loss"] += losses["adversarial_loss"].item()
-                
-                n_batches += 1
+        # Average losses
+        for key in epoch_losses.keys():
+            epoch_losses[key] /= num_batches
         
-        avg_losses = {k: v / n_batches for k, v in total_losses.items()}
-        
-        return avg_losses
+        self.current_epoch += 1
+        return epoch_losses
     
-    def save_checkpoint(self, epoch: int, is_best: bool = False):
+    def train(
+        self,
+        dataloader: DataLoader,
+        n_epochs: int,
+        save_dir: Optional[str] = None,
+        validate_every: int = 10
+    ) -> List[Dict[str, float]]:
         """
-        Save model checkpoint.
+        Train the model.
         
         Args:
-            epoch: Current epoch number
-            is_best: Whether this is the best model so far
+            dataloader: Training data loader
+            n_epochs: Number of epochs
+            save_dir: Directory to save checkpoints
+            validate_every: Validate every N epochs
+        
+        Returns:
+            List of loss dictionaries per epoch
         """
-        checkpoint = {
-            "epoch": epoch,
+        history = []
+        
+        for epoch in range(n_epochs):
+            epoch_losses = self.train_epoch(dataloader)
+            history.append(epoch_losses)
+            
+            print(f"Epoch {epoch + 1}/{n_epochs}")
+            for key, value in epoch_losses.items():
+                print(f"  {key}: {value:.4f}")
+            
+            # Save checkpoint
+            if save_dir is not None and (epoch + 1) % validate_every == 0:
+                os.makedirs(save_dir, exist_ok=True)
+                checkpoint_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch + 1}.pt")
+                self.save_checkpoint(checkpoint_path)
+        
+        return history
+    
+    def save_checkpoint(self, path: str):
+        """Save model checkpoint."""
+        torch.save({
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
-            "disc_optimizer_state_dict": self.disc_optimizer.state_dict(),
-            "best_val_loss": self.best_val_loss,
-            "training_history": self.training_history
-        }
-        
-        # Save latest
-        torch.save(checkpoint, os.path.join(self.config.save_dir, "latest.pt"))
-        
-        # Save best
-        if is_best:
-            torch.save(checkpoint, os.path.join(self.config.save_dir, "best.pt"))
+            "epoch": self.current_epoch
+        }, path)
+        print(f"Checkpoint saved to {path}")
     
-    def load_checkpoint(self, checkpoint_path: str):
-        """
-        Load model checkpoint.
-        
-        Args:
-            checkpoint_path: Path to checkpoint file
-        """
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+    def load_checkpoint(self, path: str):
+        """Load model checkpoint."""
+        checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.disc_optimizer.load_state_dict(checkpoint["disc_optimizer_state_dict"])
         self.current_epoch = checkpoint["epoch"]
-        self.best_val_loss = checkpoint["best_val_loss"]
-        self.training_history = checkpoint["training_history"]
-    
-    def train(self):
-        """
-        Main training loop with early stopping.
-        
-        Reference: Methods section - Training Implementation Details
-        """
-        print(f"Starting training on device: {self.device}")
-        print(f"Training samples: {len(self.train_dataset)}")
-        if self.val_loader is not None:
-            print(f"Validation samples: {len(self.val_dataset)}")
-        
-        for epoch in range(self.current_epoch, self.config.max_epochs):
-            # Train
-            train_losses = self.train_epoch(epoch)
-            
-            # Validate
-            val_losses = self.validate()
-            
-            # Update history
-            self.training_history["train_loss"].append(train_losses["total_loss"])
-            self.training_history["train_recon_loss"].append(train_losses["reconstruction_loss"])
-            
-            if val_losses:
-                self.training_history["val_loss"].append(val_losses["total_loss"])
-                self.training_history["val_recon_loss"].append(val_losses["reconstruction_loss"])
-                
-                val_loss = val_losses["reconstruction_loss"]  # Use reconstruction loss for early stopping
-                
-                # Check for improvement
-                is_best = val_loss < self.best_val_loss
-                if is_best:
-                    self.best_val_loss = val_loss
-                    self.patience_counter = 0
-                else:
-                    self.patience_counter += 1
-                
-                # Save checkpoint
-                if self.config.save_best:
-                    self.save_checkpoint(epoch, is_best=is_best)
-                
-                # Early stopping
-                if self.patience_counter >= self.config.early_stopping_patience:
-                    print(f"\nEarly stopping at epoch {epoch+1}")
-                    print(f"Best validation loss: {self.best_val_loss:.6f}")
-                    break
-            else:
-                # No validation set, just save latest
-                if self.config.save_best:
-                    self.save_checkpoint(epoch, is_best=False)
-            
-            # Print epoch summary
-            print(f"\nEpoch {epoch+1}/{self.config.max_epochs}")
-            print(f"Train Loss: {train_losses['total_loss']:.6f}")
-            print(f"Train Recon: {train_losses['reconstruction_loss']:.6f}")
-            if val_losses:
-                print(f"Val Loss: {val_losses['total_loss']:.6f}")
-                print(f"Val Recon: {val_losses['reconstruction_loss']:.6f}")
-                print(f"Best Val Loss: {self.best_val_loss:.6f}")
-                print(f"Patience: {self.patience_counter}/{self.config.early_stopping_patience}")
-        
-        print("\nTraining completed!")
-        
-        # Load best model
-        if self.config.save_best and self.val_loader is not None:
-            best_path = os.path.join(self.config.save_dir, "best.pt")
-            if os.path.exists(best_path):
-                print(f"Loading best model from {best_path}")
-                self.load_checkpoint(best_path)
-
+        print(f"Checkpoint loaded from {path}")

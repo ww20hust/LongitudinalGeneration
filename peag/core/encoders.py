@@ -1,158 +1,145 @@
 """
 Modality-specific encoders for PEAG framework.
 
-Each encoder maps input features to parameters of a 16-dimensional isotropic
-multivariate normal distribution using a two-layer neural network.
-
-Reference: Methods section - Modality-Specific Encoders and Past-State Integration
+This module implements VAE encoders for different clinical modalities,
+including lab tests, metabolomics, and Past-State encoder.
 """
-
 import torch
 import torch.nn as nn
+from typing import Optional
 
 
-class TabularEncoder(nn.Module):
-    """
-    Base class for tabular data encoders.
+class LabTestsEncoder(nn.Module):
+    """VAE Encoder for lab test features."""
     
-    Two-layer non-linear neural network that maps input features to
-    16-dimensional latent distribution parameters.
-    """
-    
-    def __init__(self, input_dim: int, latent_dim: int = 16, hidden_dim: int = 128):
-        """
-        Initialize tabular encoder.
-        
-        Args:
-            input_dim: Dimension of input features
-            latent_dim: Dimension of latent space (default: 16)
-            hidden_dim: Dimension of hidden layer (default: 128)
-        """
-        super(TabularEncoder, self).__init__()
-        
+    def __init__(self, input_dim: int = 61, latent_dim: int = 16, hidden_dim: int = 128):
+        super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
         
-        # Two-layer network with ReLU activation
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.relu = nn.ReLU()
+        # Encoder network
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
         
-        # Output layers for mean and log variance
+        # Mean and log variance heads
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
     
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Encode input to latent distribution parameters.
+        Encode lab tests to latent distribution.
         
         Args:
-            x: Input features of shape (batch_size, input_dim)
+            x: Lab test features (batch_size, input_dim)
         
         Returns:
-            mu: Mean vector of shape (batch_size, latent_dim)
-            logvar: Log variance vector of shape (batch_size, latent_dim)
+            mu: Mean of latent distribution (batch_size, latent_dim)
+            logvar: Log variance of latent distribution (batch_size, latent_dim)
         """
-        h = self.relu(self.fc1(x))
-        h = self.relu(self.fc2(h))
-        
+        h = self.encoder(x)
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
-        
         return mu, logvar
 
 
-class LabTestsEncoder(TabularEncoder):
-    """
-    Encoder for laboratory tests (61 features).
+class MetabolomicsEncoder(nn.Module):
+    """VAE Encoder for metabolomics features."""
     
-    Reference: Methods section - Modality-Specific Encoders
-    """
+    def __init__(self, input_dim: int = 251, latent_dim: int = 16, hidden_dim: int = 128):
+        super().__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        
+        # Encoder network
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        
+        # Mean and log variance heads
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
     
-    def __init__(self, latent_dim: int = 16, hidden_dim: int = 128):
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Initialize lab tests encoder.
+        Encode metabolomics to latent distribution.
         
         Args:
-            latent_dim: Dimension of latent space (default: 16)
-            hidden_dim: Dimension of hidden layer (default: 128)
-        """
-        super(LabTestsEncoder, self).__init__(
-            input_dim=61,
-            latent_dim=latent_dim,
-            hidden_dim=hidden_dim
-        )
-
-
-class MetabolomicsEncoder(TabularEncoder):
-    """
-    Encoder for metabolomics data (251 features).
-    
-    Reference: Methods section - Modality-Specific Encoders
-    """
-    
-    def __init__(self, latent_dim: int = 16, hidden_dim: int = 128):
-        """
-        Initialize metabolomics encoder.
+            x: Metabolomics features (batch_size, input_dim)
         
-        Args:
-            latent_dim: Dimension of latent space (default: 16)
-            hidden_dim: Dimension of hidden layer (default: 128)
+        Returns:
+            mu: Mean of latent distribution (batch_size, latent_dim)
+            logvar: Log variance of latent distribution (batch_size, latent_dim)
         """
-        super(MetabolomicsEncoder, self).__init__(
-            input_dim=251,
-            latent_dim=latent_dim,
-            hidden_dim=hidden_dim
-        )
+        h = self.encoder(x)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        return mu, logvar
 
 
 class PastStateEncoder(nn.Module):
-    """
-    Encoder for Past-State (16-dimensional input from previous visit).
-    
-    Processes the joint latent representation from the previous visit
-    into a 16-dimensional distribution for alignment.
-    
-    Reference: Methods section - Modality-Specific Encoders and Past-State Integration
-    """
+    """Encoder for Past-State (previous Visit State)."""
     
     def __init__(self, latent_dim: int = 16, hidden_dim: int = 64):
-        """
-        Initialize Past-State encoder.
-        
-        Args:
-            latent_dim: Dimension of latent space (default: 16)
-            hidden_dim: Dimension of hidden layer (default: 64)
-        """
-        super(PastStateEncoder, self).__init__()
-        
+        super().__init__()
         self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
         
-        # Two-layer network with ReLU activation
-        self.fc1 = nn.Linear(latent_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.relu = nn.ReLU()
+        # Simple encoder for past state
+        self.encoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU()
+        )
         
-        # Output layers for mean and log variance
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
     
     def forward(self, past_state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Encode Past-State to latent distribution parameters.
+        Encode Past-State to latent distribution.
         
         Args:
-            past_state: Past-State vector of shape (batch_size, latent_dim)
+            past_state: Previous Visit State (batch_size, latent_dim)
         
         Returns:
-            mu: Mean vector of shape (batch_size, latent_dim)
-            logvar: Log variance vector of shape (batch_size, latent_dim)
+            mu: Mean of latent distribution (batch_size, latent_dim)
+            logvar: Log variance of latent distribution (batch_size, latent_dim)
         """
-        h = self.relu(self.fc1(past_state))
-        h = self.relu(self.fc2(h))
-        
+        h = self.encoder(past_state)
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
-        
         return mu, logvar
 
+
+class GenericModalityEncoder(nn.Module):
+    """Generic encoder that can be used for any modality."""
+    
+    def __init__(self, input_dim: int, latent_dim: int = 16, hidden_dim: int = 128):
+        super().__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+    
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.encoder(x)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        return mu, logvar

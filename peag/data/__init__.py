@@ -1,7 +1,7 @@
 """
-Data processing modules for PEAG.
-
-This module contains data loaders and dataset classes for handling
-longitudinal clinical data.
+Data handling utilities for PEAG framework.
 """
 
+from peag.data.dataset import LongitudinalDataset, collate_visits
+
+__all__ = ["LongitudinalDataset", "collate_visits"]
