@@ -2,12 +2,6 @@
 
 Patient-context Enhanced Longitudinal Multimodal Alignment and Generation — a deep learning framework for longitudinal multimodal clinical data with multiple visits and missing modalities.
 
-## Features
-
-- **Multi-visit processing** — Loop over arbitrary visits; visit state feeds into the next as past state.
-- **Missing modalities** — Mask-based: `0` = available, `1` = actively masked (training), `2` = naturally missing. Only available modalities are encoded and used in alignment/fusion.
-- **Supervised imputation** — Reconstruction loss on available (and actively masked) modalities; missing modalities are imputed from the fused visit state.
-
 ## Installation
 
 ```bash
