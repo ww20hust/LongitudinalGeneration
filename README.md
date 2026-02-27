@@ -86,6 +86,10 @@ For each visit:
 
 **Losses:** reconstruction (on available/actively masked with targets), KL (on encoded modalities + past), alignment (on available only), optional adversarial on reconstructions.
 
+![PEAG input–output demo](docs/peag-demo.svg)
+
+(Incomplete multi-visit multimodal input → PEAG → complete output. [Open full demo in browser](docs/peag-demo.html).)
+
 ## API Summary
 
 | Component | Description |

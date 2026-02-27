@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 180" width="520" height="180">
+  <defs>
+    <style>
+      .fg { fill: #1a1a1a; }
+      .label { font: 600 12px system-ui, sans-serif; }
+      .cell { font: 14px system-ui, sans-serif; fill: #fff; }
+      .cell-available { fill: #2d7d46; stroke: #2d7d46; }
+      .cell-missing { fill: none; stroke: #868e96; stroke-dasharray: 4 2; }
+      .cell-missing .char { fill: #868e96; }
+      .peag-box { fill: #0d6efd; }
+      .peag-text { fill: #fff; font: 700 18px system-ui, sans-serif; letter-spacing: 0.1em; }
+      .arrow { fill: #495057; font-size: 24px; }
+      .output-grid { opacity: 0; transform-origin: 390px 60px; animation: outputAppear 4s ease-in-out infinite; }
+      .imputed-cell { animation: imputedPulse 4s ease-in-out infinite; }
+      @keyframes outputAppear {
+        0%, 35% { opacity: 0; transform: scale(0.95); }
+        45%, 100% { opacity: 1; transform: scale(1); }
+      }
+      @keyframes imputedPulse {
+        0%, 45%, 100% { opacity: 1; }
+        50%, 55% { opacity: 0.7; }
+        60% { opacity: 1; }
+      }
+    </style>
+  </defs>
+  <!-- Input panel -->
+  <g transform="translate(0, 0)">
+    <text x="50" y="18" class="label fg">Input</text>
+    <text x="70" y="42" class="label fg">Lab</text>
+    <text x="130" y="42" class="label fg">Metab</text>
+    <text x="8" y="68" class="label fg">Visit 1</text>
+    <rect x="60" y="52" width="52" height="28" rx="4" class="cell-available"/>
+    <text x="86" y="70" class="cell">&#x2713;</text>
+    <rect x="120" y="52" width="52" height="28" rx="4" class="cell-available"/>
+    <text x="146" y="70" class="cell">&#x2713;</text>
+    <text x="8" y="98" class="label fg">Visit 2</text>
+    <rect x="60" y="82" width="52" height="28" rx="4" class="cell-available"/>
+    <text x="86" y="100" class="cell">&#x2713;</text>
+    <rect x="120" y="82" width="52" height="28" rx="4" class="cell-missing"/>
+    <text x="146" y="100" class="cell-missing char">?</text>
+  </g>
+  <!-- Arrow 1 -->
+  <text x="195" y="78" class="arrow">&#x2192;</text>
+  <!-- PEAG box -->
+  <g transform="translate(220, 35)">
+    <rect x="0" y="0" width="80" height="50" rx="8" class="peag-box"/>
+    <text x="40" y="32" class="peag-text" text-anchor="middle">PEAG</text>
+  </g>
+  <!-- Arrow 2 -->
+  <text x="325" y="78" class="arrow">&#x2192;</text>
+  <!-- Output panel -->
+  <g class="output-grid" transform="translate(340, 0)">
+    <text x="390" y="18" class="label fg">Output</text>
+    <text x="410" y="42" class="label fg">Lab</text>
+    <text x="470" y="42" class="label fg">Metab</text>
+    <text x="348" y="68" class="label fg">Visit 1</text>
+    <rect x="400" y="52" width="52" height="28" rx="4" class="cell-available"/>
+    <text x="426" y="70" class="cell">&#x2713;</text>
+    <rect x="460" y="52" width="52" height="28" rx="4" class="cell-available"/>
+    <text x="486" y="70" class="cell">&#x2713;</text>
+    <text x="348" y="98" class="label fg">Visit 2</text>
+    <rect x="400" y="82" width="52" height="28" rx="4" class="cell-available"/>
+    <text x="426" y="100" class="cell">&#x2713;</text>
+    <rect x="460" y="82" width="52" height="28" rx="4" class="cell-available imputed-cell"/>
+    <text x="486" y="100" class="cell">&#x2713;</text>
+  </g>
+</svg>

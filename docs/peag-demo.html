@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PEAG input–output demo</title>
+  <style>
+    :root {
+      --fg: #1a1a1a;
+      --bg: #f8f9fa;
+      --cell-available: #2d7d46;
+      --cell-missing: #dee2e6;
+      --cell-missing-border: #868e96;
+      --peag-bg: #0d6efd;
+      --peag-fg: #fff;
+      --arrow: #495057;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e9ecef;
+        --bg: #212529;
+        --cell-available: #37b24d;
+        --cell-missing: #343a40;
+        --cell-missing-border: #868e96;
+        --peag-bg: #0a58ca;
+        --peag-fg: #fff;
+        --arrow: #adb5bd;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      padding: 1rem;
+    }
+    .flow {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .panel {
+      padding: 1rem;
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .panel h3 {
+      margin: 0 0 0.75rem 0;
+      font-size: 0.9rem;
+      font-weight: 600;
+      text-align: center;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: auto 1fr 1fr;
+      grid-template-rows: auto 1fr 1fr;
+      gap: 4px;
+      align-items: center;
+    }
+    .grid .label, .grid .cell {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8rem;
+      border-radius: 4px;
+    }
+    .grid .label {
+      text-align: left;
+      font-weight: 600;
+    }
+    .cell {
+      border: 2px solid var(--cell-available);
+      background: var(--cell-available);
+      color: var(--peag-fg);
+      min-width: 3rem;
+      min-height: 2.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .cell.missing {
+      background: transparent;
+      border: 2px dashed var(--cell-missing-border);
+      color: var(--cell-missing-border);
+    }
+    .cell.missing::after {
+      content: "?";
+    }
+    .cell.imputed {
+      animation: imputed-pulse 4s ease-in-out infinite;
+    }
+    @keyframes imputed-pulse {
+      0%, 45%, 100% { opacity: 1; }
+      50%, 55% { opacity: 0.6; box-shadow: 0 0 0 2px var(--peag-bg); }
+      60% { opacity: 1; box-shadow: none; }
+    }
+    .output-panel .grid {
+      opacity: 0;
+      animation: output-appear 4s ease-in-out infinite;
+    }
+    @keyframes output-appear {
+      0%, 35% { opacity: 0; transform: scale(0.95); }
+      45%, 100% { opacity: 1; transform: scale(1); }
+    }
+    .peag-box {
+      padding: 1.25rem 1.5rem;
+      background: var(--peag-bg);
+      color: var(--peag-fg);
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 1.25rem;
+      letter-spacing: 0.05em;
+      animation: peag-glow 4s ease-in-out infinite;
+    }
+    @keyframes peag-glow {
+      0%, 30%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(13, 110, 253, 0.4); }
+      40% { opacity: 1; box-shadow: 0 0 20px 4px rgba(13, 110, 253, 0.5); }
+      50% { box-shadow: 0 0 0 0 rgba(13, 110, 253, 0.4); }
+    }
+    .arrow {
+      color: var(--arrow);
+      font-size: 1.5rem;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="flow">
+    <section class="panel" aria-label="Input">
+      <h3>Input</h3>
+      <div class="grid">
+        <div class="label"></div>
+        <div class="label">Lab</div>
+        <div class="label">Metab</div>
+        <div class="label">Visit 1</div>
+        <div class="cell">✓</div>
+        <div class="cell">✓</div>
+        <div class="label">Visit 2</div>
+        <div class="cell">✓</div>
+        <div class="cell missing"></div>
+      </div>
+    </section>
+    <span class="arrow" aria-hidden="true">→</span>
+    <section class="panel" aria-label="Model">
+      <h3></h3>
+      <div class="peag-box">PEAG</div>
+    </section>
+    <span class="arrow" aria-hidden="true">→</span>
+    <section class="panel output-panel" aria-label="Output">
+      <h3>Output</h3>
+      <div class="grid">
+        <div class="label"></div>
+        <div class="label">Lab</div>
+        <div class="label">Metab</div>
+        <div class="label">Visit 1</div>
+        <div class="cell">✓</div>
+        <div class="cell">✓</div>
+        <div class="label">Visit 2</div>
+        <div class="cell">✓</div>
+        <div class="cell imputed">✓</div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
