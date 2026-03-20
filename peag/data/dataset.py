@@ -36,9 +36,9 @@ class LongitudinalDataset(Dataset):
             min_completeness_ratio: Optional filter threshold in [0, 1]. If set,
                            only keep patients whose ratio of available (visit, modality)
                            cells is >= this value.
-            train_mask_rate: Optional active-mask rate in [0, 1]. If set, active
-                           masking is applied per (visit, modality) on top of
-                           natural missingness during __getitem__.
+            train_mask_rate: Optional active-mask probability in [0, 1]. If set,
+                           each visit masks at most one currently observed
+                           modality with this probability during __getitem__.
         """
         self.train_mask_rate = train_mask_rate
         self.min_completeness_ratio = min_completeness_ratio
@@ -152,28 +152,27 @@ class LongitudinalDataset(Dataset):
             return patient_id, visits_tensors, base_masks
         
         # Active-mask training: create 0/1/2 masks on top of natural missing (2)
+        # with at most one currently observed modality masked per visit.
         masks_012: List[Dict[str, int]] = []
         for visit_mask, visit_tensors in zip(base_masks, visits_tensors):
-            new_visit_mask: Dict[str, int] = {}
-            # First assign 0/1/2 based on natural missing and random active mask
-            for mod_name, natural_value in visit_mask.items():
-                if natural_value == 2:
-                    # Naturally missing stays 2
-                    new_visit_mask[mod_name] = 2
-                else:
-                    # Available: randomly choose 0 (available) or 1 (actively masked)
-                    if np.random.rand() < float(self.train_mask_rate):
-                        new_visit_mask[mod_name] = 1
-                    else:
-                        new_visit_mask[mod_name] = 0
-            
-            # Ensure at least one modality remains available (mask == 0) in this visit
-            if all(mask_value != 0 for mask_value in new_visit_mask.values()):
-                for mod_name, natural_value in visit_mask.items():
-                    if natural_value == 0:
-                        new_visit_mask[mod_name] = 0
-                        break
-            
+            new_visit_mask: Dict[str, int] = {
+                mod_name: 2 if natural_value == 2 else 0
+                for mod_name, natural_value in visit_mask.items()
+            }
+
+            available_modalities = [
+                mod_name
+                for mod_name, natural_value in visit_mask.items()
+                if natural_value == 0 and visit_tensors.get(mod_name) is not None
+            ]
+
+            if (
+                len(available_modalities) > 1
+                and np.random.rand() < float(self.train_mask_rate)
+            ):
+                masked_modality = str(np.random.choice(available_modalities))
+                new_visit_mask[masked_modality] = 1
+
             masks_012.append(new_visit_mask)
         
         return patient_id, visits_tensors, masks_012

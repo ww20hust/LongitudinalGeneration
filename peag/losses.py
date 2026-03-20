@@ -73,6 +73,23 @@ def alignment_penalty_loss(alignment_loss: torch.Tensor) -> torch.Tensor:
     return alignment_loss
 
 
+def missingness_adversarial_loss(
+    adversary: nn.Module,
+    reconstructions: torch.Tensor,
+    missing_labels: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Binary cross-entropy loss for modality-level missingness classification.
+
+    Labels are defined as 0 for observed modalities and 1 for missing
+    modalities, where missing includes both active masking and natural
+    missingness.
+    """
+    logits = adversary(reconstructions).squeeze(-1)
+    labels = missing_labels.to(logits.dtype)
+    return F.binary_cross_entropy_with_logits(logits, labels)
+
+
 def adversarial_loss_generator(
     discriminator: nn.Module,
     fake_data: torch.Tensor

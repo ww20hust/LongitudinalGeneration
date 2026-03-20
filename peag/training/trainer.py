@@ -60,7 +60,7 @@ class Trainer:
                 visits_device = []
                 for visit in visits:
                     visit_device = {
-                        k: v.to(self.device) if v is not None else None
+                        k: (v.to(self.device).unsqueeze(0) if v is not None and v.dim() == 1 else v.to(self.device) if v is not None else None)
                         for k, v in visit.items()
                     }
                     visits_device.append(visit_device)
@@ -160,10 +160,15 @@ class Trainer:
     
     def save_checkpoint(self, path: str):
         """Save model checkpoint."""
-        torch.save({
+        checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "epoch": self.current_epoch
+        }
+        if hasattr(self.model, "get_config"):
+            checkpoint["model_config"] = self.model.get_config()
+        torch.save({
+            **checkpoint
         }, path)
         print(f"Checkpoint saved to {path}")
     

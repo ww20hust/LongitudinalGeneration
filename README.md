@@ -1,6 +1,8 @@
 # PEAG
 
-Patient-context Enhanced Longitudinal Multimodal Alignment and Generation — a deep learning framework for longitudinal multimodal clinical data with multiple visits and missing modalities.
+Patient-context Enhanced Longitudinal Multimodal Alignment and Generation for
+longitudinal multimodal clinical data with missing visits and modalities.
+
 
 ## Installation
 
@@ -8,58 +10,77 @@ Patient-context Enhanced Longitudinal Multimodal Alignment and Generation — a 
 pip install -e .
 ```
 
-Requires Python ≥3.8, PyTorch ≥1.9, NumPy, and optionally `tqdm`.
+Requires Python 3.8+, PyTorch 1.9+, NumPy, and optionally `tqdm`.
 
 ## Quick Start
 
 ```python
 import torch
 from torch.utils.data import DataLoader
+
+from peag.data.dataset import LongitudinalDataset, collate_visits, create_synthetic_data
 from peag.model import PEAGModel
-from peag.data.dataset import create_synthetic_data, LongitudinalDataset, collate_visits
 from peag.training.trainer import Trainer
 
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
 modality_dims = {"lab": 61, "metab": 251}
-model = PEAGModel(modality_dims=modality_dims, latent_dim=16, hidden_dim=128)
+model = PEAGModel(
+    modality_dims=modality_dims,
+    latent_dim=16,
+    hidden_dim=32,
+    temporal_model="recurrent",  # or "transformer"
+).to(device)
 
 patient_ids, visits_data, missing_masks = create_synthetic_data(
-    n_patients=100, n_visits=3, modality_dims=modality_dims, missing_rate=0.3
+    n_patients=1000,
+    n_visits=3,
+    modality_dims=modality_dims,
+    missing_rate=0.3,
 )
-dataset = LongitudinalDataset(patient_ids, visits_data, missing_masks)
+dataset = LongitudinalDataset(
+    patient_ids=patient_ids,
+    visits_data=visits_data,
+    missing_masks=missing_masks,
+    train_mask_rate=0.6,
+)
 dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_visits)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-trainer = Trainer(model, optimizer)
+trainer = Trainer(model, optimizer, device=device)
 history = trainer.train(dataloader, n_epochs=50)
 ```
 
-**Imputation (inference):**
+## Training and Inference
 
-```python
-imputed = model.impute_missing(visits_data, missing_masks)
-# imputed[visit_idx][mod_name] is imputed when mask was 2 or data was None
-```
-
-## Scripts
-
-**Train** (synthetic data, optional active masking and checkpoint saving):
+Train with active masking:
 
 ```bash
-python scripts/train.py --n_patients 100 --n_visits 3 --epochs 10 --save_dir ./ckpts
+CUDA_VISIBLE_DEVICES=0 python scripts/train.py --device cuda:0 --n_patients 100 --n_visits 3 --epochs 10 --train_mask_rate 0.6 --save_dir ./ckpts
 ```
 
-**Inference** (load checkpoint and run imputation):
+Train with transformer-based temporal modeling:
 
 ```bash
-python scripts/inference.py --checkpoint ./ckpts/checkpoint_epoch_10.pt
+CUDA_VISIBLE_DEVICES=0 python scripts/train.py --device cuda:0 --temporal_model transformer --temporal_num_heads 4 --temporal_num_layers 1
+```
+
+Inference from a checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/inference.py --device cuda:0 --checkpoint ./ckpts/checkpoint_epoch_10.pt
 ```
 
 ## Data Format
 
-- **visits_data**: `List[Dict[str, Tensor]]` — one dict per visit; keys = modality names, value = `(batch, dim)` or `None` if missing.
-- **missing_masks**: `List[Dict[str, int]]` — same length; `0` = available, `1` = actively masked, `2` = naturally missing.
+- `visits_data`: `List[Dict[str, Tensor]]`, one dictionary per visit.
+- `missing_masks`: `List[Dict[str, int]]`, one dictionary per visit.
+- Mask convention:
+  - `0`: currently available
+  - `1`: actively masked during training
+  - `2`: naturally missing
 
-Example: one patient, three visits, metabolomics missing at visit 2:
+Example:
 
 ```python
 visits_data = [
@@ -73,33 +94,90 @@ missing_masks = [
     {"lab": 0, "metab": 0},
 ]
 ```
+<p align="center">
+  <img src="docs/peag-demo.svg" alt="PEAG input-output demo" width="760">
+</p>
+## Framework Summary
 
-## Model Overview
+For visit `N`, PEAG:
 
-For each visit:
+1. Encodes only the currently available modalities.
+2. Builds the historical state with a temporal autoregressive module.
+3. Aligns available modality distributions with the historical latent state.
+4. Computes the visit state with equal-weight fusion:
 
-1. Encode available modalities (skip where mask ≠ 0 or data is `None`).
-2. Encode past state (zeros at first visit).
-3. Align available modality distributions (pairwise Jeffrey divergence) and fuse with past state.
-4. Visit state = mean of available modality means and past-state mean.
-5. Decode all modalities from visit state; set past state = visit state for next visit.
+```text
+Z^N = (Z_P + sum(Z_M)) / (M_total + 1)
+```
 
-**Losses:** reconstruction (on available/actively masked with targets), KL (on encoded modalities + past), alignment (on available only), optional adversarial on reconstructions.
+Here `M_total` counts only the currently observed modalities and does not
+include the historical state `Z_P`.
 
-![PEAG input–output demo](docs/peag-demo.svg)
+5. Decodes every modality from the fused visit state.
 
-(Incomplete multi-visit multimodal input → PEAG → complete output. [Open full demo in browser](docs/peag-demo.html).)
+## Active Masking
+
+During training, PEAG applies single-modality active masking:
+
+- For each visit, one currently observed modality is randomly masked with
+  probability `0.6`.
+- Naturally missing modalities remain marked as `2`.
+- If a visit has only one observed modality, it is not actively masked so the
+  model always retains at least one current modality plus history.
+
+This setting follows the paper revision: the model reconstructs the masked
+modality from the remaining available modality information together with the
+historical state.
+
+## Temporal Module Options
+
+The autoregressive component is not restricted to an RNN formulation.
+
+- `temporal_model="recurrent"` uses a GRU-style hidden-state update.
+- `temporal_model="transformer"` uses causal self-attention over previous visit
+  states and is better suited to longer visit sequences.
+
+Both options plug into the same PEAG fusion and decoding pipeline.
 
 ## API Summary
 
 | Component | Description |
 |-----------|-------------|
-| `PEAGModel(modality_dims, latent_dim=16, hidden_dim=128, lambda_kl, lambda_align, lambda_adv)` | Main model |
-| `model.forward(visits_data, missing_masks, kl_annealing_weight=1.0, recon_targets=None)` | Returns `reconstructions`, `losses` |
-| `model.impute_missing(visits_data, missing_masks)` | Returns list of per-visit dicts (imputed where missing) |
-| `LongitudinalDataset(patient_ids, visits_data, missing_masks, min_completeness_ratio, train_mask_rate)` | Dataset with optional filtering and active masking |
-| `create_synthetic_data(n_patients, n_visits, modality_dims, missing_rate, seed)` | Synthetic longitudinal data |
-| `Trainer(model, optimizer).train(dataloader, n_epochs, save_dir, validate_every)` | Training loop with KL annealing |
+| `PEAGModel(..., temporal_model="recurrent")` | Main model with recurrent or transformer temporal dynamics |
+| `model.forward(visits_data, missing_masks, kl_annealing_weight=1.0, recon_targets=None)` | Returns `reconstructions` and `losses` |
+| `model.impute_missing(visits_data, missing_masks)` | Returns per-visit imputations |
+| `LongitudinalDataset(..., train_mask_rate=0.6)` | Dataset with single-modality active masking |
+| `Trainer(model, optimizer).train(...)` | Training loop with KL annealing and checkpointing |
+
+## Paper Reproduction and Benchmarks
+
+The repository includes dedicated folders for reproducing the paper's ablation
+studies and benchmark experiments.
+
+- `scripts/Ablation/`
+  Contains PEAG ablation code for the two-visit metabolomics imputation task.
+  This folder includes:
+  - historical-state ablation at inference time
+  - alignment-strategy ablations, including directional stop-gradient and point-wise alignment
+  - loss ablations for removing `L_align` and `L_adv`
+  - active-masking probability sensitivity analysis
+
+- `scripts/Benchmark-single-cell-Method/`
+  Contains the adapted static single-cell multimodal baselines used for the
+  metabolomics imputation benchmark. This folder includes:
+  - `MIDAS`
+  - `scVAEIT`
+  - `StabMap`
+  - the shared patient-level split and CSV-to-benchmark preparation pipeline
+
+- `scripts/Bencmark-EHR-Modeling/`
+  Contains the paper's clinical patient-representation / EHR modeling
+  benchmarks for the proteomics generation task. This folder includes:
+  - a PEAG-based benchmark
+  - a Transformer benchmark
+  - a Llama 3.1 benchmark
+  - shared utilities for loading history + current-lab inputs and reporting
+    proteomics prediction metrics
 
 ## License
 

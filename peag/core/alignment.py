@@ -71,67 +71,82 @@ def jeffrey_divergence(
     return kl_forward + kl_reverse
 
 
+def _collect_available_distributions(
+    modality_distributions: Dict[str, tuple[torch.Tensor, torch.Tensor]],
+    missing_mask: Dict[str, int],
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    available_dists = []
+    for mod_name, (mu, logvar) in modality_distributions.items():
+        if missing_mask.get(mod_name, 2) == 0 and mu is not None:
+            available_dists.append((mu, logvar))
+    return available_dists
+
+
 def align_distributions_dynamic(
     modality_distributions: Dict[str, tuple[torch.Tensor, torch.Tensor]],
     z_past_mu: torch.Tensor,
     z_past_logvar: torch.Tensor,
-    missing_mask: Dict[str, int]
+    missing_mask: Dict[str, int],
+    strategy: str = "jeffrey",
 ) -> torch.Tensor:
     """
     Compute alignment loss between available modalities and Past-State.
-    
-    Computes pairwise Jeffrey divergences between all AVAILABLE distributions 
-    (excluding missing modalities) and returns the sum as the alignment penalty.
-    
-    Reference: Methods section - Alignment Penalty
-    
-    Args:
-        modality_distributions: Dictionary mapping modality names to their 
-                                distribution tuples (mu, logvar).
-        z_past_mu: Past-State encoder mean (batch_size, latent_dim)
-        z_past_logvar: Past-State encoder log variance (batch_size, latent_dim)
-        missing_mask: Dictionary indicating which modalities are missing.
-                      Keys are modality names, values are integer codes:
-                      0 = available, 1 = actively masked, 2 = naturally missing.
-    
-    Returns:
-        Alignment loss scalar value. Returns 0 if fewer than 2 distributions available.
+
+    Supported strategies:
+    - "jeffrey": average pairwise Jeffrey divergence across all available branches
+    - "directional_stop_gradient": current branches are fixed references and only
+      the historical branch receives alignment gradients
+    - "pointwise": average pairwise mean matching with MSE
     """
-    # Collect all available distributions
-    available_dists = []
-    available_names = []
-    
-    for mod_name, (mu, logvar) in modality_distributions.items():
-        if missing_mask.get(mod_name, 2) == 0 and mu is not None:
-            available_dists.append((mu, logvar))
-            available_names.append(mod_name)
-    
-    # Always include past state
-    available_dists.append((z_past_mu, z_past_logvar))
-    available_names.append("past")
-    
-    # Need at least 2 distributions to align
-    if len(available_dists) < 2:
-        return torch.tensor(0.0, device=z_past_mu.device)
-    
-    # Compute pairwise Jeffrey divergences
-    total_alignment_loss = 0.0
-    num_pairs = 0
-    
-    for i in range(len(available_dists)):
-        for j in range(i + 1, len(available_dists)):
-            mu_i, logvar_i = available_dists[i]
-            mu_j, logvar_j = available_dists[j]
-            
-            jeffrey_div = jeffrey_divergence(mu_i, logvar_i, mu_j, logvar_j)
-            total_alignment_loss += jeffrey_div
-            num_pairs += 1
-    
-    # Average over all pairs
-    if num_pairs > 0:
-        total_alignment_loss = total_alignment_loss / num_pairs
-    
-    return total_alignment_loss
+    strategy = strategy.lower()
+    available_dists = _collect_available_distributions(modality_distributions, missing_mask)
+
+    if strategy in {"jeffrey", "default"}:
+        available_dists = list(available_dists)
+        available_dists.append((z_past_mu, z_past_logvar))
+        if len(available_dists) < 2:
+            return torch.tensor(0.0, device=z_past_mu.device)
+
+        total_alignment_loss = 0.0
+        num_pairs = 0
+        for i in range(len(available_dists)):
+            for j in range(i + 1, len(available_dists)):
+                mu_i, logvar_i = available_dists[i]
+                mu_j, logvar_j = available_dists[j]
+                total_alignment_loss += jeffrey_divergence(mu_i, logvar_i, mu_j, logvar_j)
+                num_pairs += 1
+        return total_alignment_loss / num_pairs
+
+    if strategy in {"directional_stop_gradient", "stop_gradient", "stop-grad"}:
+        if len(available_dists) == 0:
+            return torch.tensor(0.0, device=z_past_mu.device)
+        total_alignment_loss = 0.0
+        for mu, logvar in available_dists:
+            total_alignment_loss += jeffrey_divergence(
+                mu.detach(),
+                logvar.detach(),
+                z_past_mu,
+                z_past_logvar,
+            )
+        return total_alignment_loss / len(available_dists)
+
+    if strategy in {"pointwise", "pointwise_mse", "point-wise"}:
+        available_means = [mu for mu, _ in available_dists]
+        available_means.append(z_past_mu)
+        if len(available_means) < 2:
+            return torch.tensor(0.0, device=z_past_mu.device)
+        total_alignment_loss = 0.0
+        num_pairs = 0
+        for i in range(len(available_means)):
+            for j in range(i + 1, len(available_means)):
+                total_alignment_loss += torch.mean((available_means[i] - available_means[j]) ** 2)
+                num_pairs += 1
+        return total_alignment_loss / num_pairs
+
+    raise ValueError(
+        f"Unsupported alignment strategy '{strategy}'. "
+        "Choose from: jeffrey, directional_stop_gradient, pointwise."
+    )
 
 
 def align_distributions_simple(
@@ -142,7 +157,8 @@ def align_distributions_simple(
     z_past_mu: torch.Tensor,
     z_past_logvar: torch.Tensor,
     lab_available: bool = True,
-    metab_available: bool = True
+    metab_available: bool = True,
+    strategy: str = "jeffrey",
 ) -> torch.Tensor:
     """
     Simple alignment function for backward compatibility.
@@ -177,4 +193,10 @@ def align_distributions_simple(
     else:
         missing_mask["metab"] = 2
     
-    return align_distributions_dynamic(distributions, z_past_mu, z_past_logvar, missing_mask)
+    return align_distributions_dynamic(
+        distributions,
+        z_past_mu,
+        z_past_logvar,
+        missing_mask,
+        strategy=strategy,
+    )

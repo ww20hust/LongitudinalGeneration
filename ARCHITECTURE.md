@@ -2,123 +2,109 @@
 
 ## Overview
 
-PEAG processes longitudinal multimodal visits in a loop: encode available modalities, align their latent distributions with past state, fuse into a visit state, decode all modalities (for imputation), then pass the visit state to the next visit. Losses are computed only where data is available (or actively masked with a target).
+PEAG processes longitudinal multimodal visits in temporal order:
 
-**Mask convention:** `0` = available, `1` = actively masked (training), `2` = naturally missing.
+1. encode the currently available modalities at visit `N`
+2. summarize previous visit states into a historical state `Z_P`
+3. align current modality distributions with `Z_P`
+4. fuse current modalities and `Z_P` into the visit state `Z^N`
+5. decode every modality for reconstruction or imputation
 
-## Data Flow
+Mask convention:
 
-```
-INPUT
-  visits_data  = [visit_1, visit_2, ..., visit_T]
-  missing_masks = [mask_1, mask_2, ..., mask_T]
+- `0`: currently available
+- `1`: actively masked during training
+- `2`: naturally missing
 
-  Per visit: {mod_name: tensor or None}
-  Per mask:  {mod_name: 0 | 1 | 2}
-                    │
-                    ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│  FOR EACH VISIT                                                            │
-│                                                                            │
-│  past_state = zeros(...) for t=1; else previous visit_state                │
-│       │                                                                    │
-│       ▼                                                                    │
-│  ENCODE (skip where mask ≠ 0 or data is None)                             │
-│    modality_dists[mod] = (mu, logvar)   only for available                │
-│    past_mu, past_logvar = past_encoder(past_state)                        │
-│       │                                                                    │
-│       ▼                                                                    │
-│  ALIGN (only available + past)                                            │
-│    Pairwise Jeffrey divergence over (modality_dists + past), averaged    │
-│       │                                                                    │
-│       ▼                                                                    │
-│  FUSE                                                                      │
-│    visit_state = mean(available_mus + [past_mu])                          │
-│       │                                                                    │
-│       ▼                                                                    │
-│  DECODE (all modalities)                                                  │
-│    reconstructions[mod] = decoder[mod](visit_state)   for every mod      │
-│       │                                                                    │
-│       ▼                                                                    │
-│  past_state = visit_state  for next visit                                 │
-└───────────────────────────────────────────────────────────────────────────┘
-                    │
-                    ▼
-LOSSES
-  Recon:  only (visit, mod) with mask 0 or 1 and target not None
-  KL:     only encoded modalities + past, then averaged
-  Align:  per-visit alignment loss, averaged over visits
-  Adv:    generator loss on (e.g. last visit) primary-modality reconstruction
-                    │
-                    ▼
-OUTPUT
-  reconstructions: List[Dict[str, Tensor]]  (one dict per visit)
-  losses: { total_loss, recon_loss, kl_loss, alignment_loss, adversarial_loss, ... }
-  visit_states: optional, if return_all_visit_states=True
+## Visit-State Fusion
+
+The visit state uses equal-weight fusion:
+
+```text
+Z^N = (Z_P + sum(Z_M)) / (M_total + 1)
 ```
 
-## Design Choices
+- `Z_P` is the historical latent state
+- `Z_M` are the latent means of the currently observed modalities
+- `M_total` counts only current modalities and does not include `Z_P`
 
-- **Exclusion, not substitution** — Missing modalities are not filled with the previous visit’s encoding; they are excluded from encoding, alignment, and fusion. Only available modalities and past state are used.
-- **Dynamic alignment and fusion** — Alignment and fusion use whatever set of modalities is available at that visit (plus past state), so the number of terms varies by visit.
-- **Supervised imputation** — Reconstruction loss is applied only where we have a target (available or actively masked with `recon_targets`). Missing modalities are still decoded (imputed) but not supervised at that visit.
+This makes the implementation explicit that history is added once, and current
+modalities are not double-counted.
 
-## Example: 3 Visits, Metabolomics Missing at Visit 2
+## Active Masking During Training
 
+The revised training strategy uses single-modality active masking:
+
+- at each visit, PEAG samples whether to actively mask with probability `0.6`
+- if masking is triggered, exactly one currently observed modality is selected
+  and relabeled from `0` to `1`
+- naturally missing modalities stay `2`
+- a visit is never left without a current modality after active masking
+
+This forces the model to reconstruct the masked modality from the remaining
+current modality information together with the historical state.
+
+## Temporal Autoregressive Module
+
+The autoregressive component of PEAG is modular rather than fixed to an RNN.
+
+### Recurrent option
+
+- uses a GRU-style hidden-state update
+- good default for shorter sequences
+
+### Transformer option
+
+- uses causal self-attention over previous visit states
+- better suited to longer longitudinal visit sequences
+- implemented as a lightweight temporal encoder, not a full redesign of PEAG
+
+In both cases, the module outputs the historical state consumed by the
+Past-State encoder at the next visit.
+
+## Forward Pass
+
+```text
+for each visit N:
+    historical_state = temporal_module(history_of_previous_visit_states)
+    modality_dists = encode(currently_available_modalities_only)
+    past_dist = past_encoder(historical_state)
+    align(modality_dists, past_dist)
+    visit_state = (past_mu + sum(current_modality_mus)) / (M_total + 1)
+    decode_all_modalities(visit_state)
+    append visit_state to temporal history
 ```
-Visit 1: lab=✓, metab=✓
-Visit 2: lab=✓, metab=✗
-Visit 3: lab=✓, metab=✓
 
-Visit 1: Encode lab, metab, past → align 3-way → fuse → decode all.
-Visit 2: Encode lab, past (metab skipped) → align 2-way → fuse → decode all (metab = imputed).
-Visit 3: Encode lab, metab, past → align 3-way → fuse → decode all.
+## Losses
 
-Recon: V1(lab+metab), V2(lab only when no recon_targets; with recon_targets also metab), V3(lab+metab).
-```
+- Reconstruction loss:
+  - with active masking, supervised where mask is `0` or `1` and a target exists
+  - naturally missing entries (`2`) are decoded but not supervised
+- KL loss:
+  - computed for encoded current modalities plus the historical latent branch
+- Alignment loss:
+  - computed only on available current modalities and history
+- Adversarial loss:
+  - optional gradient-reversal regularization on reconstructed modalities
+  - each modality has a binary adversary that predicts whether that modality
+    was missing at the current visit
+  - missing includes both actively masked (`1`) and naturally missing (`2`)
 
 ## Module Layout
 
-```
+```text
 peag/
-├── model.py           # PEAGModel: forward, compute_losses, impute_missing
-├── losses.py         # reconstruction_loss, kl_divergence_loss, compute_total_loss, adversarial
-├── core/
-│   ├── encoders.py    # LabTestsEncoder, MetabolomicsEncoder, PastStateEncoder, GenericModalityEncoder
-│   ├── decoders.py    # LabTestsDecoder, MetabolomicsDecoder, GenericModalityDecoder
-│   ├── alignment.py   # align_distributions_dynamic (Jeffrey divergence)
-│   ├── fusion.py      # compute_visit_state_dynamic
-│   └── adversarial.py # MissingnessDiscriminator
-├── data/
-│   └── dataset.py     # LongitudinalDataset, collate_visits, create_synthetic_data
-├── training/
-│   └── trainer.py     # Trainer: train_epoch, train, KL annealing
-└── utils/
-    └── distributions.py
-```
-
-## API (minimal)
-
-```python
-from peag.model import PEAGModel
-
-model = PEAGModel(
-    modality_dims={"lab": 61, "metab": 251},
-    latent_dim=16,
-    hidden_dim=128,
-)
-
-visits_data = [
-    {"lab": lab_t1, "metab": metab_t1},
-    {"lab": lab_t2, "metab": None},
-    {"lab": lab_t3, "metab": metab_t3},
-]
-missing_masks = [
-    {"lab": 0, "metab": 0},
-    {"lab": 0, "metab": 2},
-    {"lab": 0, "metab": 0},
-]
-
-out = model.forward(visits_data, missing_masks)
-imputed = model.impute_missing(visits_data, missing_masks)
+  model.py              # main PEAG model
+  losses.py             # reconstruction, KL, adversarial, total loss
+  core/
+    encoders.py         # modality encoders + past-state encoder
+    decoders.py         # modality decoders
+    alignment.py        # dynamic Jeffrey-divergence alignment
+    fusion.py           # explicit equal-weight visit-state fusion
+    temporal.py         # recurrent / transformer temporal modules
+    adversarial.py      # discriminators
+  data/
+    dataset.py          # dataset and active masking
+  training/
+    trainer.py          # training loop and checkpointing
 ```

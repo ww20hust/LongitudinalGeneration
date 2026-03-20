@@ -14,19 +14,43 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to a trained PEAG model checkpoint.",
     )
+    parser.add_argument(
+        "--temporal_model",
+        type=str,
+        default=None,
+        choices=["recurrent", "transformer"],
+        help="Optional override for checkpoints that do not store model_config.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Torch device, for example cpu, cuda, or cuda:0.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    modality_dims = {"lab": 61, "metab": 251}
-    model = PEAGModel(modality_dims=modality_dims, latent_dim=16, hidden_dim=128)
-    model.to(device)
+    device = args.device
 
     checkpoint = torch.load(args.checkpoint, map_location=device)
+    model_config = checkpoint.get(
+        "model_config",
+        {
+            "modality_dims": {"lab": 61, "metab": 251},
+            "latent_dim": 16,
+            "hidden_dim": 128,
+            "temporal_model": args.temporal_model or "recurrent",
+        },
+    )
+    if args.temporal_model is not None:
+        model_config["temporal_model"] = args.temporal_model
+
+    modality_dims = model_config["modality_dims"]
+    model = PEAGModel(**model_config)
+    model.to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 

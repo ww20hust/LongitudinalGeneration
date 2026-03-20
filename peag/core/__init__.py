@@ -22,9 +22,14 @@ from peag.core.fusion import (
     compute_visit_state_dynamic,
     AdaptiveVisitStateFusion
 )
+from peag.core.temporal import (
+    RecurrentTemporalModule,
+    TransformerTemporalModule,
+    build_temporal_module
+)
 from peag.core.adversarial import (
-    MissingnessDiscriminator,
-    ModalityDiscriminator
+    GradientReversalLayer,
+    ModalityMissingnessAdversary,
 )
 
 __all__ = [
@@ -40,6 +45,9 @@ __all__ = [
     "align_distributions_simple",
     "compute_visit_state_dynamic",
     "AdaptiveVisitStateFusion",
-    "MissingnessDiscriminator",
-    "ModalityDiscriminator"
+    "RecurrentTemporalModule",
+    "TransformerTemporalModule",
+    "build_temporal_module",
+    "GradientReversalLayer",
+    "ModalityMissingnessAdversary",
 ]

@@ -13,12 +13,17 @@ import torch.nn as nn
 
 def compute_visit_state_dynamic(
     modality_mus: dict[str, torch.Tensor],
-    z_past_mu: torch.Tensor
+    z_past_mu: torch.Tensor,
+    include_history: bool = True,
 ) -> torch.Tensor:
     """
-    Compute Visit State by dynamically averaging available modality means.
-    
-    Formula: z_t = mean([available_modality_mus..., z_past])
+    Compute Visit State by equal-weight fusion of current modalities and history.
+
+    Formula:
+        z_t = (z_past + sum(z_mod for current available modalities)) / (M_total + 1)
+
+    where M_total counts only the currently observed modalities and does not
+    include the historical state.
     
     The Visit State is the integrative latent state that combines information
     from all AVAILABLE modalities and the historical context. Missing modalities
@@ -35,29 +40,21 @@ def compute_visit_state_dynamic(
     Returns:
         Fused Visit State of shape (batch_size, latent_dim)
     """
-    batch_size = z_past_mu.shape[0]
-    device = z_past_mu.device
-    
-    # Collect all available modality means
-    available_means = []
-    
-    # Add available modality encodings
+    current_modality_means = []
     for mod_name, z_mu in modality_mus.items():
         if z_mu is not None:
-            available_means.append(z_mu)
-    
-    # Always include past state
-    available_means.append(z_past_mu)
-    
-    # Stack and compute mean
-    if len(available_means) == 0:
-        # Edge case: no modalities available, return past state only
-        return z_past_mu
-    
-    means_tensor = torch.stack(available_means, dim=0)  # (n_available+1, batch, latent)
-    visit_state = torch.mean(means_tensor, dim=0)  # (batch, latent)
-    
-    return visit_state
+            current_modality_means.append(z_mu)
+
+    m_total = len(current_modality_means)
+    if m_total == 0:
+        if include_history:
+            return z_past_mu
+        return torch.zeros_like(z_past_mu)
+
+    current_sum = torch.stack(current_modality_means, dim=0).sum(dim=0)
+    if not include_history:
+        return current_sum / float(m_total)
+    return (z_past_mu + current_sum) / float(m_total + 1)
 
 
 class AdaptiveVisitStateFusion(nn.Module):
