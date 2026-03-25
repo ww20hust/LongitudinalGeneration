@@ -50,6 +50,37 @@ def parse_column_argument(value: str | None) -> list[str] | None:
     return normalized or None
 
 
+def _available_row_mask(matrix: np.ndarray) -> np.ndarray:
+    return ~np.isnan(matrix).all(axis=1)
+
+
+def _validate_modality_nan_patterns(
+    frame: pd.DataFrame,
+    *,
+    id_column: str,
+    visit_column: str,
+    columns: Sequence[str],
+    modality_name: str,
+) -> None:
+    values = frame.loc[:, list(columns)].to_numpy(dtype=np.float32)
+    all_nan = np.isnan(values).all(axis=1)
+    any_nan = np.isnan(values).any(axis=1)
+    partially_missing = any_nan & ~all_nan
+    if not np.any(partially_missing):
+        return
+
+    examples = (
+        frame.loc[partially_missing, [id_column, visit_column]]
+        .head(10)
+        .to_dict(orient="records")
+    )
+    raise ValueError(
+        f"Found partially missing rows in modality '{modality_name}'. "
+        "Each modality row must be either fully observed or fully missing. "
+        f"Examples: {examples}"
+    )
+
+
 def _infer_feature_columns(
     frame: pd.DataFrame,
     id_column: str,
@@ -141,6 +172,20 @@ def load_two_visit_clinical_csv(
 
     frame[lab_columns] = frame[lab_columns].astype(np.float32)
     frame[metab_columns] = frame[metab_columns].astype(np.float32)
+    _validate_modality_nan_patterns(
+        frame,
+        id_column=id_column,
+        visit_column=visit_column,
+        columns=lab_columns,
+        modality_name="lab",
+    )
+    _validate_modality_nan_patterns(
+        frame,
+        id_column=id_column,
+        visit_column=visit_column,
+        columns=metab_columns,
+        modality_name="metab",
+    )
     return frame, lab_columns, metab_columns
 
 
@@ -172,8 +217,18 @@ def _fit_scalers(
     metab_columns: Sequence[str],
 ) -> tuple[StandardScaler, StandardScaler]:
     train_frame = frame.loc[frame[id_column].isin(train_patient_ids)]
-    lab_scaler = StandardScaler().fit(train_frame.loc[:, lab_columns].to_numpy(dtype=np.float32))
-    metab_scaler = StandardScaler().fit(train_frame.loc[:, metab_columns].to_numpy(dtype=np.float32))
+    train_lab = train_frame.loc[:, lab_columns].to_numpy(dtype=np.float32)
+    train_metab = train_frame.loc[:, metab_columns].to_numpy(dtype=np.float32)
+
+    lab_rows = _available_row_mask(train_lab)
+    metab_rows = _available_row_mask(train_metab)
+    if not np.any(lab_rows):
+        raise ValueError("No observed training rows are available for lab scaling.")
+    if not np.any(metab_rows):
+        raise ValueError("No observed training rows are available for metabolomics scaling.")
+
+    lab_scaler = StandardScaler().fit(train_lab[lab_rows])
+    metab_scaler = StandardScaler().fit(train_metab[metab_rows])
     return lab_scaler, metab_scaler
 
 
@@ -185,8 +240,21 @@ def _apply_scalers(
     metab_scaler: StandardScaler,
 ) -> pd.DataFrame:
     scaled = frame.copy()
-    scaled.loc[:, lab_columns] = lab_scaler.transform(frame.loc[:, lab_columns].to_numpy(dtype=np.float32)).astype(np.float32)
-    scaled.loc[:, metab_columns] = metab_scaler.transform(frame.loc[:, metab_columns].to_numpy(dtype=np.float32)).astype(np.float32)
+    lab_matrix = frame.loc[:, lab_columns].to_numpy(dtype=np.float32)
+    metab_matrix = frame.loc[:, metab_columns].to_numpy(dtype=np.float32)
+
+    scaled_lab = lab_matrix.copy()
+    scaled_metab = metab_matrix.copy()
+
+    lab_rows = _available_row_mask(lab_matrix)
+    metab_rows = _available_row_mask(metab_matrix)
+    if np.any(lab_rows):
+        scaled_lab[lab_rows] = lab_scaler.transform(lab_matrix[lab_rows]).astype(np.float32)
+    if np.any(metab_rows):
+        scaled_metab[metab_rows] = metab_scaler.transform(metab_matrix[metab_rows]).astype(np.float32)
+
+    scaled.loc[:, lab_columns] = scaled_lab
+    scaled.loc[:, metab_columns] = scaled_metab
     return scaled
 
 
@@ -248,6 +316,20 @@ def build_static_benchmark_split(
 ) -> TabularBenchmarkSplit:
     train_frame = frame.loc[frame[id_column].isin(train_patient_ids)].sort_values([id_column, visit_column])
     test_frame = frame.loc[(frame[id_column].isin(test_patient_ids)) & (frame[visit_column] == followup_visit)].sort_values([id_column, visit_column])
+
+    train_lab = train_frame.loc[:, lab_columns].to_numpy(dtype=np.float32)
+    train_metab = train_frame.loc[:, metab_columns].to_numpy(dtype=np.float32)
+    train_complete = _available_row_mask(train_lab) & _available_row_mask(train_metab)
+    train_frame = train_frame.loc[train_complete].copy()
+    if train_frame.empty:
+        raise ValueError("No fully paired training rows are available after filtering missing modalities.")
+
+    test_lab = test_frame.loc[:, lab_columns].to_numpy(dtype=np.float32)
+    test_metab = test_frame.loc[:, metab_columns].to_numpy(dtype=np.float32)
+    test_complete = _available_row_mask(test_lab) & _available_row_mask(test_metab)
+    test_frame = test_frame.loc[test_complete].copy()
+    if test_frame.empty:
+        raise ValueError("No evaluable follow-up rows are available in the test split.")
 
     train_index = [f"{row[id_column]}_visit{int(row[visit_column])}" for _, row in train_frame.iterrows()]
     test_index = [f"{row[id_column]}_visit{int(row[visit_column])}" for _, row in test_frame.iterrows()]
@@ -395,6 +477,10 @@ def save_scaler_stats(
 def evaluate_reconstruction(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     if y_true.shape != y_pred.shape:
         raise ValueError(f"Shape mismatch: truth={y_true.shape}, pred={y_pred.shape}")
+    if y_true.size == 0:
+        raise ValueError("No samples are available for evaluation.")
+    if np.isnan(y_true).any() or np.isnan(y_pred).any():
+        raise ValueError("Evaluation arrays contain NaN values.")
 
     true_centered = y_true - y_true.mean(axis=0, keepdims=True)
     pred_centered = y_pred - y_pred.mean(axis=0, keepdims=True)

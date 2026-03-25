@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EHR Framework Input Overview</title>
+  <style>
+    :root {
+      --bg: #f7f5ef;
+      --paper: rgba(255, 255, 255, 0.74);
+      --ink: #28323d;
+      --muted: #687483;
+      --line: #d8dfdf;
+      --peag: #dceee3;
+      --delphi: #f3ead8;
+      --llm: #e8eff7;
+      --transformer: #f5e2e2;
+      --yes: #6f947e;
+      --partial: #b28d62;
+      --no: #c38b8b;
+      --chip-bg: rgba(255, 255, 255, 0.78);
+      --shadow: 0 18px 45px rgba(124, 136, 150, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(220, 238, 227, 0.9), transparent 38%),
+        radial-gradient(circle at top right, rgba(232, 239, 247, 0.9), transparent 34%),
+        linear-gradient(180deg, #fbfaf6 0%, var(--bg) 100%);
+      padding: 40px 20px 56px;
+    }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    .hero {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    h1 {
+      margin: 0;
+      font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+      font-size: clamp(2rem, 3.8vw, 3.3rem);
+      line-height: 1.04;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1.6;
+    }
+
+    .panel {
+      background: var(--paper);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 255, 255, 0.65);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+    }
+
+    .matrix {
+      overflow: hidden;
+      margin-bottom: 22px;
+    }
+
+    .matrix-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 20px 24px 12px;
+    }
+
+    .matrix-header h2,
+    .cards-header h2 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    th,
+    td {
+      padding: 15px 16px;
+      border-top: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+      background: rgba(255, 255, 255, 0.18);
+    }
+
+    td:first-child,
+    th:first-child {
+      width: 18%;
+    }
+
+    td {
+      font-size: 0.93rem;
+      line-height: 1.45;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      background: var(--chip-bg);
+    }
+
+    .status.yes { color: #4f7360; }
+    .status.partial { color: #906e43; }
+    .status.no { color: #a86c6c; }
+
+    .cards-header {
+      padding: 20px 24px 8px;
+    }
+
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      padding: 10px 18px 18px;
+    }
+
+    .card {
+      border-radius: 22px;
+      padding: 20px;
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      min-height: 250px;
+    }
+
+    .card.peag { background: linear-gradient(180deg, rgba(220, 238, 227, 0.96), rgba(235, 245, 239, 0.92)); }
+    .card.delphi { background: linear-gradient(180deg, rgba(243, 234, 216, 0.96), rgba(248, 242, 230, 0.92)); }
+    .card.llm { background: linear-gradient(180deg, rgba(232, 239, 247, 0.96), rgba(241, 245, 250, 0.92)); }
+    .card.transformer { background: linear-gradient(180deg, rgba(245, 226, 226, 0.96), rgba(249, 239, 239, 0.92)); }
+
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .card h3 {
+      margin: 0;
+      font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .tag {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.68);
+      color: var(--muted);
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+
+    .flow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+
+    .flow.stack {
+      display: grid;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .flow-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 11px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--ink);
+      font-size: 0.82rem;
+      line-height: 1.2;
+      border: 1px solid rgba(255, 255, 255, 0.7);
+    }
+
+    .arrow {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .footnote {
+      margin-top: 16px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    @media (max-width: 920px) {
+      .cards-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .matrix-header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
+
+    @media (max-width: 760px) {
+      body {
+        padding: 22px 14px 36px;
+      }
+
+      .panel {
+        border-radius: 20px;
+      }
+
+      .matrix {
+        overflow-x: auto;
+      }
+
+      table {
+        min-width: 760px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div class="eyebrow">Longitudinal EHR Modeling</div>
+      <h1>Four Frameworks, Four Input Styles</h1>
+      <p>
+        Shared benchmark inputs: ICD code sequence and structured lab test. The main difference is how each framework converts these two signals into an embedding.
+      </p>
+    </section>
+
+    <section class="panel matrix">
+      <div class="matrix-header">
+        <h2>Input Contrast</h2>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Signal</th>
+            <th>PEAG</th>
+            <th>Delphi</th>
+            <th>General LLM (Llama)</th>
+            <th>Transformer</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Raw inputs used</td>
+            <td>ICD code sequence + structured lab test</td>
+            <td>ICD code sequence</td>
+            <td>ICD code sequence + structured lab test</td>
+            <td>ICD code sequence + structured lab test</td>
+          </tr>
+          <tr>
+            <td>Representation route</td>
+            <td>Two separate branches</td>
+            <td>Disease-event sequence only</td>
+            <td>Natural-language conversion</td>
+            <td>Tokenization + lab discretization</td>
+          </tr>
+          <tr>
+            <td>Final embedding type</td>
+            <td>Aligned and fused embedding</td>
+            <td>Trajectory embedding</td>
+            <td>LLM text embedding</td>
+            <td>Sequence embedding</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <div class="cards-header">
+        <h2>How The Embedding Is Formed</h2>
+      </div>
+      <div class="cards-grid">
+        <article class="card peag">
+          <div class="card-top">
+            <h3>PEAG</h3>
+            <span class="tag">Hybrid multimodal</span>
+          </div>
+          <div class="flow stack">
+            <div class="flow-line">
+              <span class="chip">ICD code sequence</span>
+              <span class="arrow">-&gt;</span>
+              <span class="chip">embedding</span>
+            </div>
+            <div class="flow-line">
+              <span class="chip">Structured lab test</span>
+              <span class="arrow">-&gt;</span>
+              <span class="chip">embedding</span>
+            </div>
+            <div class="flow-line">
+              <span class="chip">both embeddings</span>
+              <span class="arrow">-&gt;</span>
+              <span class="chip">aligned &amp; fused embedding</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="card delphi">
+          <div class="card-top">
+            <h3>Delphi</h3>
+            <span class="tag">Trajectory-only</span>
+          </div>
+          <div class="flow">
+            <span class="chip">ICD code sequence</span>
+            <span class="arrow">-&gt;</span>
+            <span class="chip">embedding</span>
+          </div>
+        </article>
+
+        <article class="card llm">
+          <div class="card-top">
+            <h3>General LLM (Llama)</h3>
+            <span class="tag">Text first</span>
+          </div>
+          <div class="flow">
+            <span class="chip">ICD code sequence</span>
+            <span class="chip">Structured lab test</span>
+            <span class="arrow">-&gt;</span>
+            <span class="chip">Natural-language text</span>
+            <span class="arrow">-&gt;</span>
+            <span class="chip">LLM text embedding</span>
+          </div>
+        </article>
+
+        <article class="card transformer">
+          <div class="card-top">
+            <h3>Transformer</h3>
+            <span class="tag">Tokenized sequence</span>
+          </div>
+          <div class="flow">
+            <span class="chip">ICD tokens</span>
+            <span class="chip">Discretized lab tokens</span>
+            <span class="arrow">-&gt;</span>
+            <span class="chip">embedding</span>
+          </div>
+        </article>
+      </div>
+      <div class="footnote">
+        All four panels are written in the same input-first style to make the embedding route directly comparable.
+      </div>
+    </section>
+  </main>
+</body>
+</html>

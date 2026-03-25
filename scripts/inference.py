@@ -1,5 +1,5 @@
 import argparse
-from typing import List, Dict
+from typing import Dict, List, Optional
 
 import torch
 
@@ -27,6 +27,30 @@ def parse_args() -> argparse.Namespace:
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Torch device, for example cpu, cuda, or cuda:0.",
     )
+    parser.add_argument(
+        "--fallback_modality_a_name",
+        type=str,
+        default="modality_a",
+        help="Fallback first-modality name when the checkpoint does not store model_config.",
+    )
+    parser.add_argument(
+        "--fallback_modality_a_dim",
+        type=int,
+        default=61,
+        help="Fallback first-modality dimension when the checkpoint does not store model_config.",
+    )
+    parser.add_argument(
+        "--fallback_modality_b_name",
+        type=str,
+        default="modality_b",
+        help="Fallback second-modality name when the checkpoint does not store model_config.",
+    )
+    parser.add_argument(
+        "--fallback_modality_b_dim",
+        type=int,
+        default=251,
+        help="Fallback second-modality dimension when the checkpoint does not store model_config.",
+    )
     return parser.parse_args()
 
 
@@ -39,7 +63,10 @@ def main() -> None:
     model_config = checkpoint.get(
         "model_config",
         {
-            "modality_dims": {"lab": 61, "metab": 251},
+            "modality_dims": {
+                args.fallback_modality_a_name: args.fallback_modality_a_dim,
+                args.fallback_modality_b_name: args.fallback_modality_b_dim,
+            },
             "latent_dim": 16,
             "hidden_dim": 128,
             "temporal_model": args.temporal_model or "recurrent",
@@ -54,28 +81,29 @@ def main() -> None:
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    # Example inference: one patient with three visits, missing metabolomics at visit 2.
+    # Example inference: one patient with three visits, where one modality is
+    # naturally missing at visit 2.
     batch_size = 1
-    visits_data: List[Dict[str, torch.Tensor]] = [
-        {
-            "lab": torch.randn(batch_size, modality_dims["lab"], device=device),
-            "metab": torch.randn(batch_size, modality_dims["metab"], device=device),
-        },
-        {
-            "lab": torch.randn(batch_size, modality_dims["lab"], device=device),
-            "metab": None,
-        },
-        {
-            "lab": torch.randn(batch_size, modality_dims["lab"], device=device),
-            "metab": torch.randn(batch_size, modality_dims["metab"], device=device),
-        },
-    ]
+    modality_names = list(modality_dims.keys())
+    missing_modality = modality_names[1] if len(modality_names) > 1 else modality_names[0]
+
+    visits_data: List[Dict[str, Optional[torch.Tensor]]] = []
+    for visit_idx in range(3):
+        visit_data: Dict[str, Optional[torch.Tensor]] = {}
+        for mod_name, mod_dim in modality_dims.items():
+            if visit_idx == 1 and mod_name == missing_modality:
+                visit_data[mod_name] = None
+            else:
+                visit_data[mod_name] = torch.randn(batch_size, mod_dim, device=device)
+        visits_data.append(visit_data)
+
     # Inference masks use 0 (available) and 2 (naturally missing); no active mask (1).
-    missing_masks = [
-        {"lab": 0, "metab": 0},
-        {"lab": 0, "metab": 2},
-        {"lab": 0, "metab": 0},
-    ]
+    missing_masks = []
+    for visit_idx in range(3):
+        visit_mask = {}
+        for mod_name in modality_dims.keys():
+            visit_mask[mod_name] = 2 if visit_idx == 1 and mod_name == missing_modality else 0
+        missing_masks.append(visit_mask)
 
     imputed_visits = model.impute_missing(visits_data, missing_masks)
 

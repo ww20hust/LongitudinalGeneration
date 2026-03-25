@@ -328,6 +328,7 @@ def encode_transformer_sample(
     discretizer: LabDiscretizer,
     max_history_events: Optional[int],
     max_age_years: int,
+    max_seq_len: Optional[int] = None,
 ) -> Tuple[List[int], List[int], List[int]]:
     token_ids: List[int] = [token_to_id[CLS_TOKEN]]
     type_ids: List[int] = [0]
@@ -357,6 +358,12 @@ def encode_transformer_sample(
     token_ids.append(token_to_id[SEP_TOKEN])
     type_ids.append(0)
     age_ids.append(0)
+
+    if max_seq_len is not None and len(token_ids) > max_seq_len:
+        tail_length = max(1, int(max_seq_len) - 1)
+        token_ids = [token_to_id[CLS_TOKEN]] + token_ids[-tail_length:]
+        type_ids = [0] + type_ids[-tail_length:]
+        age_ids = [0] + age_ids[-tail_length:]
     return token_ids, type_ids, age_ids
 
 
@@ -428,12 +435,14 @@ class TransformerProteomicsDataset(Dataset):
         discretizer: LabDiscretizer,
         max_history_events: Optional[int],
         max_age_years: int,
+        max_seq_len: Optional[int] = None,
     ) -> None:
         self.samples = list(samples)
         self.token_to_id = token_to_id
         self.discretizer = discretizer
         self.max_history_events = max_history_events
         self.max_age_years = max_age_years
+        self.max_seq_len = max_seq_len
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -446,6 +455,7 @@ class TransformerProteomicsDataset(Dataset):
             discretizer=self.discretizer,
             max_history_events=self.max_history_events,
             max_age_years=self.max_age_years,
+            max_seq_len=self.max_seq_len,
         )
         return {
             "token_ids": torch.tensor(token_ids, dtype=torch.long),

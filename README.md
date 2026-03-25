@@ -3,7 +3,6 @@
 Patient-context Enhanced Longitudinal Multimodal Alignment and Generation for
 longitudinal multimodal clinical data with missing visits and modalities.
 
-
 ## Installation
 
 ```bash
@@ -24,7 +23,7 @@ from peag.training.trainer import Trainer
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-modality_dims = {"lab": 61, "metab": 251}
+modality_dims = {"modality_a": 61, "modality_b": 251}
 model = PEAGModel(
     modality_dims=modality_dims,
     latent_dim=16,
@@ -51,12 +50,71 @@ trainer = Trainer(model, optimizer, device=device)
 history = trainer.train(dataloader, n_epochs=50)
 ```
 
-## Training and Inference
+<p align="center">
+  <img src="docs/peag-demo.svg" alt="PEAG input-output demo" width="760">
+</p>
+
+## Paper Reproduction and Benchmarks
+
+The repository includes dedicated folders for reproducing the paper's ablation
+studies and benchmark experiments.
+
+- `scripts/Ablation/`
+  Contains PEAG ablation code for the two-visit metabolomics imputation task.
+  This folder includes:
+
+  - historical-state ablation at inference time
+  - alignment-strategy ablations, including directional stop-gradient and point-wise alignment
+  - loss ablations for removing `L_align` and `L_adv`
+  - active-masking probability sensitivity analysis
+- `scripts/Benchmark-single-cell-Method/`
+  Contains the adapted static single-cell multimodal baselines used for the
+  metabolomics imputation benchmark. This folder includes:
+
+  - `MIDAS`
+  - `scVAEIT`
+  - `StabMap`
+  - the shared patient-level split and CSV-to-benchmark preparation pipeline
+- `scripts/Bencmark-EHR-Modeling/`
+  Contains the paper's clinical patient-representation / EHR modeling
+  benchmarks for the proteomics generation task. This folder includes:
+
+  - a PEAG-based benchmark
+  - a Transformer benchmark
+  - a Llama 3.1 benchmark
+  - shared utilities for loading history + current-lab inputs and reporting
+    proteomics prediction metrics
+
+## Recommended Data Format for Your Specific Task
+
+- `visits_data`: `List[Dict[str, Tensor]]`, one dictionary per visit.
+- `missing_masks`: `List[Dict[str, int]]`, one dictionary per visit.
+- Mask convention:
+  - `0`: currently available
+  - `1`: actively masked during training
+  - `2`: naturally missing
+
+Example:
+
+```python
+visits_data = [
+    {"modality_a": modality_a_t1, "modality_b": modality_b_t1},
+    {"modality_a": modality_a_t2, "modality_b": None},
+    {"modality_a": modality_a_t3, "modality_b": modality_b_t3},
+]
+missing_masks = [
+    {"modality_a": 0, "modality_b": 0},
+    {"modality_a": 0, "modality_b": 2},
+    {"modality_a": 0, "modality_b": 0},
+]
+```
+
+## Recommended Training and Inference for Your Specific Task
 
 Train with active masking:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/train.py --device cuda:0 --n_patients 100 --n_visits 3 --epochs 10 --train_mask_rate 0.6 --save_dir ./ckpts
+CUDA_VISIBLE_DEVICES=0 python scripts/train.py --device cuda:0 --n_patients 100 --n_visits 3 --epochs 10 --train_mask_rate 0.6 --modality_a_name modality_a --modality_a_dim 61 --modality_b_name modality_b --modality_b_dim 251 --save_dir ./ckpts
 ```
 
 Train with transformer-based temporal modeling:
@@ -71,32 +129,6 @@ Inference from a checkpoint:
 CUDA_VISIBLE_DEVICES=0 python scripts/inference.py --device cuda:0 --checkpoint ./ckpts/checkpoint_epoch_10.pt
 ```
 
-## Data Format
-
-- `visits_data`: `List[Dict[str, Tensor]]`, one dictionary per visit.
-- `missing_masks`: `List[Dict[str, int]]`, one dictionary per visit.
-- Mask convention:
-  - `0`: currently available
-  - `1`: actively masked during training
-  - `2`: naturally missing
-
-Example:
-
-```python
-visits_data = [
-    {"lab": lab_t1, "metab": metab_t1},
-    {"lab": lab_t2, "metab": None},
-    {"lab": lab_t3, "metab": metab_t3},
-]
-missing_masks = [
-    {"lab": 0, "metab": 0},
-    {"lab": 0, "metab": 2},
-    {"lab": 0, "metab": 0},
-]
-```
-<p align="center">
-  <img src="docs/peag-demo.svg" alt="PEAG input-output demo" width="760">
-</p>
 ## Framework Summary
 
 For visit `N`, PEAG:
@@ -141,43 +173,13 @@ Both options plug into the same PEAG fusion and decoding pipeline.
 
 ## API Summary
 
-| Component | Description |
-|-----------|-------------|
-| `PEAGModel(..., temporal_model="recurrent")` | Main model with recurrent or transformer temporal dynamics |
-| `model.forward(visits_data, missing_masks, kl_annealing_weight=1.0, recon_targets=None)` | Returns `reconstructions` and `losses` |
-| `model.impute_missing(visits_data, missing_masks)` | Returns per-visit imputations |
-| `LongitudinalDataset(..., train_mask_rate=0.6)` | Dataset with single-modality active masking |
-| `Trainer(model, optimizer).train(...)` | Training loop with KL annealing and checkpointing |
-
-## Paper Reproduction and Benchmarks
-
-The repository includes dedicated folders for reproducing the paper's ablation
-studies and benchmark experiments.
-
-- `scripts/Ablation/`
-  Contains PEAG ablation code for the two-visit metabolomics imputation task.
-  This folder includes:
-  - historical-state ablation at inference time
-  - alignment-strategy ablations, including directional stop-gradient and point-wise alignment
-  - loss ablations for removing `L_align` and `L_adv`
-  - active-masking probability sensitivity analysis
-
-- `scripts/Benchmark-single-cell-Method/`
-  Contains the adapted static single-cell multimodal baselines used for the
-  metabolomics imputation benchmark. This folder includes:
-  - `MIDAS`
-  - `scVAEIT`
-  - `StabMap`
-  - the shared patient-level split and CSV-to-benchmark preparation pipeline
-
-- `scripts/Bencmark-EHR-Modeling/`
-  Contains the paper's clinical patient-representation / EHR modeling
-  benchmarks for the proteomics generation task. This folder includes:
-  - a PEAG-based benchmark
-  - a Transformer benchmark
-  - a Llama 3.1 benchmark
-  - shared utilities for loading history + current-lab inputs and reporting
-    proteomics prediction metrics
+| Component                                                                                  | Description                                                |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| `PEAGModel(..., temporal_model="recurrent")`                                             | Main model with recurrent or transformer temporal dynamics |
+| `model.forward(visits_data, missing_masks, kl_annealing_weight=1.0, recon_targets=None)` | Returns `reconstructions` and `losses`                 |
+| `model.impute_missing(visits_data, missing_masks)`                                       | Returns per-visit imputations                              |
+| `LongitudinalDataset(..., train_mask_rate=0.6)`                                          | Dataset with single-modality active masking                |
+| `Trainer(model, optimizer).train(...)`                                                   | Training loop with KL annealing and checkpointing          |
 
 ## License
 

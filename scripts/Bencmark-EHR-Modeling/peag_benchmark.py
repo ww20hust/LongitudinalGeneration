@@ -3,14 +3,14 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+PROJECT_ROOT = SCRIPT_DIR.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -27,12 +27,7 @@ from common import (
     save_json,
     set_seed,
 )
-
-try:
-    from transformers import AutoModel, AutoTokenizer
-except ImportError:  # pragma: no cover
-    AutoModel = None
-    AutoTokenizer = None
+from llama_embedding_backends import add_llama_embedding_args, build_text_embedder, default_torch_device
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        default=default_torch_device(),
         help="Execution device.",
     )
     parser.add_argument(
@@ -75,6 +70,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional directory for cached train/valid/test history embeddings.",
     )
+    add_llama_embedding_args(parser)
     return parser.parse_args()
 
 
@@ -82,64 +78,19 @@ def build_history_texts(samples) -> List[str]:
     return [render_history_as_text(sample) for sample in samples]
 
 
-def _mean_pool(hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    weights = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
-    summed = (hidden_states * weights).sum(dim=1)
-    counts = weights.sum(dim=1).clamp(min=1.0)
-    return summed / counts
-
-
-def encode_texts(
-    texts: Sequence[str],
-    model_name_or_path: str,
-    batch_size: int,
-    max_length: int,
-    device: str,
-) -> np.ndarray:
-    if AutoModel is None or AutoTokenizer is None:
-        raise ImportError(
-            "transformers is required for peag_benchmark.py. Install it before running this benchmark."
-        )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModel.from_pretrained(model_name_or_path)
-    model.to(device)
-    model.eval()
-
-    embedding_batches: List[np.ndarray] = []
-    with torch.no_grad():
-        for start in range(0, len(texts), batch_size):
-            batch_texts = list(texts[start : start + batch_size])
-            tokenized = tokenizer(
-                batch_texts,
-                padding=True,
-                truncation=True,
-                max_length=max_length,
-                return_tensors="pt",
-            )
-            tokenized = {key: value.to(device) for key, value in tokenized.items()}
-            outputs = model(**tokenized)
-            pooled = _mean_pool(outputs.last_hidden_state, tokenized["attention_mask"])
-            embedding_batches.append(pooled.cpu().numpy().astype(np.float32))
-
-    return np.concatenate(embedding_batches, axis=0)
-
-
 def load_or_compute_embeddings(
     split_name: str,
     texts: Sequence[str],
     args: argparse.Namespace,
+    embedder=None,
 ) -> np.ndarray:
     if args.cache_dir is None:
-        return encode_texts(
+        if embedder is None:
+            raise ValueError("An initialized text embedder is required when cache_dir is not provided.")
+        return embedder.encode_texts(
             texts=texts,
-            model_name_or_path=args.llama_model_name_or_path,
             batch_size=args.embedding_batch_size,
             max_length=args.max_length,
-            device=args.device,
         )
 
     cache_dir = Path(args.cache_dir)
@@ -148,15 +99,21 @@ def load_or_compute_embeddings(
     if cache_path.exists():
         return np.load(cache_path)
 
-    embeddings = encode_texts(
+    if embedder is None:
+        raise ValueError(f"Missing text embedder while computing uncached embeddings for split '{split_name}'.")
+    embeddings = embedder.encode_texts(
         texts=texts,
-        model_name_or_path=args.llama_model_name_or_path,
         batch_size=args.embedding_batch_size,
         max_length=args.max_length,
-        device=args.device,
     )
     np.save(cache_path, embeddings)
     return embeddings
+
+
+def expected_embedding_cache_path(cache_dir: Optional[str], split_name: str) -> Optional[Path]:
+    if cache_dir is None:
+        return None
+    return Path(cache_dir) / f"{split_name}_history_embeddings.npy"
 
 
 def build_visit(
@@ -184,8 +141,8 @@ def sample_active_mask(train_mask_rate: float) -> Dict[str, int]:
 def apply_mask_to_visit(
     visit: Dict[str, torch.Tensor],
     mask: Dict[str, int],
-) -> Dict[str, torch.Tensor]:
-    masked_visit: Dict[str, torch.Tensor] = {}
+) -> Dict[str, torch.Tensor | None]:
+    masked_visit: Dict[str, torch.Tensor | None] = {}
     for modality_name, tensor in visit.items():
         mask_value = mask.get(modality_name, 2)
         if mask_value in (1, 2):
@@ -315,9 +272,14 @@ def main() -> None:
     history_valid_texts = build_history_texts(valid_samples)
     history_test_texts = build_history_texts(test_samples)
 
-    train_history_embeddings = load_or_compute_embeddings("train", history_train_texts, args)
-    valid_history_embeddings = load_or_compute_embeddings("valid", history_valid_texts, args)
-    test_history_embeddings = load_or_compute_embeddings("test", history_test_texts, args)
+    split_names = ("train", "valid", "test")
+    cache_paths = [expected_embedding_cache_path(args.cache_dir, split_name) for split_name in split_names]
+    need_embedder = args.cache_dir is None or any(path is None or not path.exists() for path in cache_paths)
+    embedder = build_text_embedder(args) if need_embedder else None
+
+    train_history_embeddings = load_or_compute_embeddings("train", history_train_texts, args, embedder=embedder)
+    valid_history_embeddings = load_or_compute_embeddings("valid", history_valid_texts, args, embedder=embedder)
+    test_history_embeddings = load_or_compute_embeddings("test", history_test_texts, args, embedder=embedder)
 
     history_dim = int(train_history_embeddings.shape[1])
     lab_vectorizer = RoutineLabVectorizer().fit(train_samples)

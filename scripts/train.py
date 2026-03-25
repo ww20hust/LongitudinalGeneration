@@ -17,6 +17,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=8, help="Training batch size.")
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs.")
     parser.add_argument(
+        "--modality_a_name",
+        type=str,
+        default="modality_a",
+        help="User-facing name for the first modality in the synthetic demo.",
+    )
+    parser.add_argument(
+        "--modality_a_dim",
+        type=int,
+        default=61,
+        help="Feature dimension for the first modality in the synthetic demo.",
+    )
+    parser.add_argument(
+        "--modality_b_name",
+        type=str,
+        default="modality_b",
+        help="User-facing name for the second modality in the synthetic demo.",
+    )
+    parser.add_argument(
+        "--modality_b_dim",
+        type=int,
+        default=251,
+        help="Feature dimension for the second modality in the synthetic demo.",
+    )
+    parser.add_argument(
         "--min_completeness_ratio",
         type=float,
         default=0.8,
@@ -65,7 +89,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    modality_dims = {"lab": 61, "metab": 251}
+    modality_dims = {
+        args.modality_a_name: args.modality_a_dim,
+        args.modality_b_name: args.modality_b_dim,
+    }
 
     # Create synthetic data; natural missingness is controlled by missing_rate.
     # For training with active mask it is often useful to start from mostly

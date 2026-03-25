@@ -87,6 +87,19 @@ CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/transformer_benchmar
   --save_dir outputs/transformer_benchmark
 ```
 
+`transformer_benchmark.py` is configured to train end-to-end on a single 24 GB
+GPU by default. The main memory-saving choices are:
+
+- `batch_size=8`
+- `max_history_events=256`
+- `max_seq_len=512`
+- `d_model=192`, `num_heads=6`, `num_layers=3`
+- CUDA mixed precision enabled by default unless `--disable_amp` is passed
+
+If your dataset still contains unusually long event histories, the encoded
+sequence is truncated to `max_seq_len` while preserving the leading `[CLS]`
+token and the most recent tokens.
+
 ### Llama 3.1 baseline
 
 ```bash
@@ -100,6 +113,28 @@ CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/llama31_benchmark.py
   --cache_dir outputs/llama31_cache
 ```
 
+For a 24 GB GPU, prefer reduced-precision loading for the frozen Llama encoder.
+This keeps the benchmark logic unchanged while making embedding extraction more
+practical on a single RTX 3090 / 4090-class card:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/llama31_benchmark.py \
+  --device cuda:0 \
+  --train_path data/proteomics_train.jsonl \
+  --valid_path data/proteomics_valid.jsonl \
+  --test_path data/proteomics_test.jsonl \
+  --save_dir outputs/llama31_benchmark \
+  --llama_model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
+  --llama_device cuda:0 \
+  --llama_dtype float16 \
+  --embedding_batch_size 1 \
+  --max_length 512 \
+  --cache_dir outputs/llama31_cache
+```
+
+If 24 GB is still tight, add `--llama_load_in_8bit`. For the smallest memory
+footprint on CUDA, add `--llama_load_in_4bit` instead.
+
 ### PEAG benchmark
 
 ```bash
@@ -110,6 +145,25 @@ CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/peag_benchmark.py \
   --test_path data/proteomics_test.jsonl \
   --save_dir outputs/peag_benchmark \
   --llama_model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
+  --cache_dir outputs/peag_cache
+```
+
+The same Llama loading flags are available in `peag_benchmark.py` because PEAG
+also relies on frozen Llama history embeddings. A 24 GB GPU-friendly launch
+looks like:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/peag_benchmark.py \
+  --device cuda:0 \
+  --train_path data/proteomics_train.jsonl \
+  --valid_path data/proteomics_valid.jsonl \
+  --test_path data/proteomics_test.jsonl \
+  --save_dir outputs/peag_benchmark \
+  --llama_model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
+  --llama_device cuda:0 \
+  --llama_dtype float16 \
+  --embedding_batch_size 1 \
+  --max_length 512 \
   --cache_dir outputs/peag_cache
 ```
 
@@ -135,6 +189,7 @@ performance summaries such as:
 - `transformer_benchmark.py` depends on the repository's standard PyTorch / NumPy stack
 - `llama31_benchmark.py` and `peag_benchmark.py` additionally require
   `transformers` and access to a Llama 3.1 checkpoint
+- for CUDA 8-bit / 4-bit loading, install `bitsandbytes`
 
 ## Scope
 

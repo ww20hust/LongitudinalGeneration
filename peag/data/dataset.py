@@ -227,7 +227,7 @@ def create_synthetic_data(
         patient_ids, visits_data, missing_masks
     """
     if modality_dims is None:
-        modality_dims = {"lab": 61, "metab": 251}
+        modality_dims = {"modality_a": 61, "modality_b": 251}
     
     np.random.seed(seed)
     

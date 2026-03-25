@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, List
 
@@ -100,20 +101,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test_path", type=str, required=True, help="Test samples (.json or .jsonl).")
     parser.add_argument("--save_dir", type=str, required=True, help="Directory to store checkpoints and metrics.")
     parser.add_argument("--epochs", type=int, default=50, help="Maximum number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Mini-batch size.")
+    parser.add_argument("--batch_size", type=int, default=8, help="Mini-batch size.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="AdamW weight decay.")
-    parser.add_argument("--d_model", type=int, default=256, help="Transformer hidden size.")
-    parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
-    parser.add_argument("--num_layers", type=int, default=4, help="Number of Transformer encoder layers.")
-    parser.add_argument("--ff_dim", type=int, default=512, help="Feed-forward hidden dimension.")
+    parser.add_argument("--d_model", type=int, default=192, help="Transformer hidden size.")
+    parser.add_argument("--num_heads", type=int, default=6, help="Number of attention heads.")
+    parser.add_argument("--num_layers", type=int, default=3, help="Number of Transformer encoder layers.")
+    parser.add_argument("--ff_dim", type=int, default=768, help="Feed-forward hidden dimension.")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate.")
-    parser.add_argument("--max_history_events", type=int, default=512, help="Max number of ICD events retained before the current visit.")
-    parser.add_argument("--max_seq_len", type=int, default=1024, help="Max token sequence length.")
+    parser.add_argument("--max_history_events", type=int, default=256, help="Max number of ICD events retained before the current visit.")
+    parser.add_argument("--max_seq_len", type=int, default=512, help="Max token sequence length.")
     parser.add_argument("--max_age_years", type=int, default=120, help="Max age bucket for age embeddings.")
     parser.add_argument("--num_lab_bins", type=int, default=10, help="Number of discrete bins per lab feature.")
     parser.add_argument("--patience", type=int, default=10, help="Validation patience for early stopping.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--disable_amp",
+        action="store_true",
+        help="Disable CUDA mixed-precision training. Enabled by default on CUDA to reduce memory usage.",
+    )
     parser.add_argument(
         "--device",
         type=str,
@@ -195,6 +201,7 @@ def main() -> None:
         discretizer=discretizer,
         max_history_events=args.max_history_events,
         max_age_years=args.max_age_years,
+        max_seq_len=args.max_seq_len,
     )
     valid_dataset = TransformerProteomicsDataset(
         samples=valid_samples,
@@ -202,6 +209,7 @@ def main() -> None:
         discretizer=discretizer,
         max_history_events=args.max_history_events,
         max_age_years=args.max_age_years,
+        max_seq_len=args.max_seq_len,
     )
     test_dataset = TransformerProteomicsDataset(
         samples=test_samples,
@@ -209,25 +217,30 @@ def main() -> None:
         discretizer=discretizer,
         max_history_events=args.max_history_events,
         max_age_years=args.max_age_years,
+        max_seq_len=args.max_seq_len,
     )
 
+    pin_memory = args.device.startswith("cuda")
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_transformer_batch,
+        pin_memory=pin_memory,
     )
     valid_loader = DataLoader(
         valid_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_transformer_batch,
+        pin_memory=pin_memory,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_transformer_batch,
+        pin_memory=pin_memory,
     )
 
     model = TransformerProteomicsRegressor(
@@ -250,6 +263,10 @@ def main() -> None:
     loss_fn = nn.MSELoss()
     early_stopper = EarlyStopper(patience=args.patience)
     best_checkpoint_path = save_dir / "best_model.pt"
+    use_amp = args.device.startswith("cuda") and torch.cuda.is_available() and not args.disable_amp
+    supports_bf16 = hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if supports_bf16 else torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
 
     training_log: List[Dict[str, float]] = []
     best_valid_mse = None
@@ -260,23 +277,34 @@ def main() -> None:
         total_train_examples = 0
 
         for batch in train_loader:
-            token_ids = batch["token_ids"].to(args.device)
-            type_ids = batch["type_ids"].to(args.device)
-            age_ids = batch["age_ids"].to(args.device)
-            attention_mask = batch["attention_mask"].to(args.device)
-            targets = batch["targets"].to(args.device)
+            token_ids = batch["token_ids"].to(args.device, non_blocking=pin_memory)
+            type_ids = batch["type_ids"].to(args.device, non_blocking=pin_memory)
+            age_ids = batch["age_ids"].to(args.device, non_blocking=pin_memory)
+            attention_mask = batch["attention_mask"].to(args.device, non_blocking=pin_memory)
+            targets = batch["targets"].to(args.device, non_blocking=pin_memory)
 
-            predictions = model(
-                token_ids=token_ids,
-                type_ids=type_ids,
-                age_ids=age_ids,
-                attention_mask=attention_mask,
+            optimizer.zero_grad(set_to_none=True)
+            autocast_context = (
+                torch.cuda.amp.autocast(dtype=amp_dtype)
+                if use_amp
+                else nullcontext()
             )
-            loss = loss_fn(predictions, targets)
+            with autocast_context:
+                predictions = model(
+                    token_ids=token_ids,
+                    type_ids=type_ids,
+                    age_ids=age_ids,
+                    attention_mask=attention_mask,
+                )
+                loss = loss_fn(predictions, targets)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             batch_size = int(targets.shape[0])
             total_train_loss += float(loss.item()) * batch_size

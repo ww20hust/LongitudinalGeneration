@@ -86,9 +86,11 @@ def build_bundle_from_args(args):
     )
 
 
-def build_model_from_args(args, **overrides: Any) -> PEAGModel:
+def build_model_from_args(args, bundle, **overrides: Any) -> PEAGModel:
+    lab_dim = len(bundle.lab_columns)
+    metab_dim = len(bundle.metab_columns)
     model_kwargs = {
-        "modality_dims": {"lab": args.expected_lab_dim, "metab": args.expected_metab_dim},
+        "modality_dims": {"lab": lab_dim, "metab": metab_dim},
         "latent_dim": args.latent_dim,
         "hidden_dim": args.hidden_dim,
         "lambda_kl": args.lambda_kl,
@@ -123,7 +125,7 @@ def train_model(bundle, args, experiment_dir: Path, **model_overrides: Any):
         pin_memory=str(args.device).startswith("cuda"),
     )
 
-    model = build_model_from_args(args, **model_overrides)
+    model = build_model_from_args(args, bundle, **model_overrides)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.learning_rate,
@@ -167,8 +169,9 @@ def evaluate_followup_imputation(
     output_dir: Path | None = None,
 ) -> dict[str, Any]:
     model.eval()
-    predictions_scaled = []
-    sample_ids = []
+    predicted_by_id: dict[str, np.ndarray] = {}
+    eval_ids = list(bundle.raw_static_split.test_index)
+    eval_id_set = set(eval_ids)
 
     with torch.no_grad():
         for patient_id, patient_visits, patient_masks in zip(
@@ -176,6 +179,10 @@ def evaluate_followup_imputation(
             bundle.test_visits,
             bundle.test_missing_masks,
         ):
+            sample_id = f"{patient_id}_visit1"
+            if sample_id not in eval_id_set:
+                continue
+
             visits_input = []
             masks_input = []
             for visit_index, (visit, visit_mask) in enumerate(zip(patient_visits, patient_masks)):
@@ -193,10 +200,14 @@ def evaluate_followup_imputation(
                 kl_annealing_weight=1.0,
                 use_history_in_fusion=use_history_in_fusion,
             )
-            predictions_scaled.append(output["reconstructions"][-1]["metab"][0].detach().cpu().numpy())
-            sample_ids.append(f"{patient_id}_visit1")
+            predicted_by_id[sample_id] = output["reconstructions"][-1]["metab"][0].detach().cpu().numpy()
 
-    predictions_scaled = np.asarray(predictions_scaled, dtype=np.float32)
+    missing_predictions = [sample_id for sample_id in eval_ids if sample_id not in predicted_by_id]
+    if missing_predictions:
+        raise ValueError(f"Missing predictions for evaluation samples: {missing_predictions[:10]}")
+
+    sample_ids = eval_ids
+    predictions_scaled = np.asarray([predicted_by_id[sample_id] for sample_id in sample_ids], dtype=np.float32)
     predictions_raw = bundle.metab_scaler.inverse_transform(predictions_scaled)
     truth_raw = bundle.raw_static_split.test_metab
     metrics = evaluate_reconstruction(truth_raw, predictions_raw)

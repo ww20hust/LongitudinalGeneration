@@ -1,39 +1,102 @@
-﻿# Static Single-Cell Baselines for Clinical Metabolomics Imputation
+﻿# Benchmarking Single-Cell Multimodal Frameworks and PEAG on Clinical Two-Visit Imputation
 
-This folder adapts `MIDAS`, `scVAEIT`, and `StabMap` to the PEAG metabolomics-imputation benchmark using a single longitudinal CSV.
+This folder benchmarks `MIDAS`, `scVAEIT`, `StabMap`, and `PEAG` on the same
+clinical metabolomics-imputation task.
 
-## Benchmark Protocol
+## Benchmark Goal
 
-All methods use the same patient-level train/test split.
+Target task: reconstruct follow-up Modality B (metabolomics) from follow-up
+Modality A (routine labs), under patient-level train/test separation.
 
-- Training patients: every visit is treated as an independent paired sample `(lab, metabolomics)`.
-- Test patients: only `visit=1` is evaluated.
-- Test input: `visit=1` lab features only.
-- Test target: the same patient's `visit=1` metabolomics profile.
-- Static baselines never use baseline history or any historical-state variable.
+- Input to all methods at evaluation: held-out patient `visit=1` Modality A.
+- Reconstruction target for all methods: the same held-out patient `visit=1`
+  Modality B.
+- Additional context used only by PEAG: the same patient's `visit=0` profile
+  to form historical state.
 
-This matches the manuscript framing: PEAG is the longitudinal model; MIDAS, scVAEIT, and StabMap are adapted static multimodal baselines.
+This design keeps the reconstructed object identical across methods while
+isolating PEAG's longitudinal conditioning capability.
 
-## Expected CSV Format
+## Fairness Protocol
 
-The input CSV should contain:
+All methods use the exact same patient-level split.
+
+- No patient appears in both train and test.
+- For static single-cell baselines (`MIDAS`, `scVAEIT`, `StabMap`): each visit
+  from training patients is treated as an independent paired sample `(A, B)`.
+- Static baselines do not use historical-state variables.
+- For PEAG: training uses longitudinal sequences; evaluation uses `visit=0` as
+  historical context and imputes `visit=1` Modality B.
+
+## Input CSV Format
+
+Expected columns:
 
 - `eid`: patient identifier
 - `visit`: visit index (`0` or `1`)
-- `61` routine lab columns
-- `251` metabolomics columns
+- Modality A columns (routine labs)
+- Modality B columns (metabolomics)
 
-Columns can be provided explicitly with `--lab-columns` and `--metab-columns`, inferred by prefix, or inferred automatically as the first `61` non-metadata columns followed by the next `251` columns.
+Column selection options:
 
-## External Dependencies
+- explicit names: `--lab-columns`, `--metab-columns`
+- prefix inference: `--lab-prefix`, `--metab-prefix`
+- default fallback: first `61` non-metadata columns as Modality A and next
+  `251` as Modality B
 
-`MIDAS`, `scVAEIT`, and `StabMap` are not vendored into this repository. The benchmark code expects them to exist under:
+## Preprocessing Pipeline (shared)
+
+For all methods, preprocessing follows the same steps:
+
+1. Build patient-level split using `train_ratio` and `split_seed`.
+2. Convert training-set visits into paired static samples for baseline methods.
+3. Fit modality-specific standardization on training data only.
+4. Apply the same transforms to train/test.
+5. Evaluate in original scale using inverse transform.
+
+Prepared matrices and scaler stats are exported under each method's
+`<output-dir>/prepared` for reproducibility.
+
+## Method Adaptations
+
+### MIDAS (static baseline)
+
+- Input structure: paired two-modality samples in MuData format.
+- Architecture change: decoder distributions switched to Gaussian for
+  continuous clinical variables.
+- Inference: query uses follow-up Modality A only; model imputes follow-up
+  Modality B.
+
+### scVAEIT (static baseline)
+
+- Input structure: concatenate `(A, B)` into a two-block Gaussian VAE input.
+- Architecture change: two continuous blocks with Gaussian likelihood.
+- Inference: mark Modality B block as unobserved; extract reconstructed
+  Modality B block.
+
+### StabMap (static baseline)
+
+- Input structure: paired training visits as reference and follow-up Modality A
+  from test patients as query.
+- Adaptation: shared Modality A anchors transfer in the shared embedding.
+- Inference: transfer/impute follow-up Modality B via reference-query mapping.
+
+### PEAG (longitudinal model)
+
+- Input structure: per-patient two-visit sequence.
+- Training: active modality masking with longitudinal conditioning.
+- Inference: use `visit=0` as historical context plus follow-up Modality A;
+  reconstruct follow-up Modality B.
+
+## External Dependencies for Static Baselines
+
+`MIDAS`, `scVAEIT`, and `StabMap` are expected at:
 
 - `scripts/Benchmark-single-cell-Method/baseline-model/scVAEIT`
 - `scripts/Benchmark-single-cell-Method/baseline-model/midas`
 - `scripts/Benchmark-single-cell-Method/baseline-model/StabMap`
 
-From the repository root, run:
+From repository root:
 
 ```bash
 cd scripts/Benchmark-single-cell-Method
@@ -44,51 +107,58 @@ git clone https://github.com/labomics/midas.git baseline-model/midas
 git clone https://github.com/MarioniLab/StabMap.git baseline-model/StabMap
 ```
 
-These clone locations are required because the Python adapters and the StabMap R wrapper resolve the external code through those exact relative paths.
-
 ## Scripts
 
 - `prepare_tabular_benchmark.py`
-  Converts the longitudinal CSV into the static benchmark split used by all baselines.
-- `run_scvaeit.py`
-  Runs scVAEIT on the metabolomics-imputation task.
+  Export shared prepared split from longitudinal CSV.
 - `run_midas.py`
-  Runs MIDAS on the metabolomics-imputation task.
+  Run MIDAS adaptation.
+- `run_scvaeit.py`
+  Run scVAEIT adaptation.
 - `run_stabmap_from_csv.py`
-  Prepares the split from the longitudinal CSV and then runs the StabMap R benchmark.
-- `r/run_stabmap_benchmark.R`
-  Runs StabMap when a prepared split directory already exists.
+  Run StabMap adaptation.
+- `run_peag.py`
+  Run PEAG with longitudinal historical-state conditioning.
 
 ## Example Commands
 
 ```bash
-python scripts/Benchmark-single-cell-Method/prepare_tabular_benchmark.py \
+python scripts/Benchmark-single-cell-Method/run_midas.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/static_benchmark_prepared
+  --output-dir outputs/midas \
+  --train-ratio 0.7 \
+  --split-seed 0
 ```
 
 ```bash
 python scripts/Benchmark-single-cell-Method/run_scvaeit.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/scvaeit
-```
-
-```bash
-python scripts/Benchmark-single-cell-Method/run_midas.py \
-  --csv data/clinical_two_visit.csv \
-  --output-dir outputs/midas
+  --output-dir outputs/scvaeit \
+  --train-ratio 0.7 \
+  --split-seed 0
 ```
 
 ```bash
 python scripts/Benchmark-single-cell-Method/run_stabmap_from_csv.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/stabmap
+  --output-dir outputs/stabmap \
+  --train-ratio 0.7 \
+  --split-seed 0
+```
+
+```bash
+python scripts/Benchmark-single-cell-Method/run_peag.py \
+  --csv data/clinical_two_visit.csv \
+  --output-dir outputs/peag \
+  --train-ratio 0.7 \
+  --split-seed 0 \
+  --train-mask-rate 0.6
 ```
 
 ## Outputs
 
-Each benchmark writes:
+Each method writes:
 
-- prepared train/test matrices
-- predicted metabolomics CSVs
+- prepared train/test matrices and scaler stats
+- predicted follow-up Modality B CSVs
 - `metrics.json` with `Pearson r`, `MAE`, and `MSE`
