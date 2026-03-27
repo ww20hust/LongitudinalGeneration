@@ -51,7 +51,7 @@ history = trainer.train(dataloader, n_epochs=50)
 ```
 
 <p align="center">
-  <img src="docs/peag-demo.svg" alt="PEAG input-output demo" width="760">
+  <img src="docs/peag_missing_imputation_diagram.svg" alt="PEAG input-output demo" width="1200">
 </p>
 
 ## Paper Reproduction and Benchmarks
