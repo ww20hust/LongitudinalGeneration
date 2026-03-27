@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--test_path', type=str, required=True)
     parser.add_argument('--save_dir', type=str, required=True)
     parser.add_argument('--device', type=str, default=default_torch_device())
-    parser.add_argument('--llama_model_name_or_path', type=str, default='meta-llama/Meta-Llama-3-8B-Instruct')
+    parser.add_argument('--llama_model_name_or_path', type=str, default='meta-llama/Llama-3.1-8B')
     parser.add_argument('--embedding_batch_size', type=int, default=2)
     parser.add_argument('--max_length', type=int, default=1024)
     parser.add_argument('--llama_cache_dir', type=str, default=None)

@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--llama_model_name_or_path",
         type=str,
-        default="meta-llama/Llama-3.1-8B-Instruct",
+        default="meta-llama/Llama-3.1-8B",
         help="HuggingFace model name or local path for the frozen Llama history encoder.",
     )
     parser.add_argument("--embedding_batch_size", type=int, default=4, help="Batch size for frozen Llama encoding.")

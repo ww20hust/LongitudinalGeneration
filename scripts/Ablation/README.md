@@ -32,13 +32,13 @@ Columns can be passed explicitly or inferred by prefix. If no explicit mapping i
 ```bash
 python scripts/Ablation/run_metabolomics_ablations.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/ablation
+  --output-dir scripts/Ablation/outputs/ablation
 ```
 
 ```bash
 python scripts/Ablation/run_mask_probability_sensitivity.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/mask_sensitivity \
+  --output-dir scripts/Ablation/outputs/mask_sensitivity \
   --mask-rates 0.0,0.2,0.4,0.6,0.8,1.0
 ```
 

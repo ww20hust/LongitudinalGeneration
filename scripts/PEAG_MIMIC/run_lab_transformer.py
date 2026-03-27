@@ -10,7 +10,7 @@ from models import LabTransformerClassifier
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='LabTests-only Transformer benchmark on prepared MIMIC splits.')
+    parser = argparse.ArgumentParser(description='Structured-clinical-measurements-only Transformer benchmark on prepared MIMIC splits.')
     parser.add_argument('--train_path', type=str, required=True)
     parser.add_argument('--valid_path', type=str, required=True)
     parser.add_argument('--test_path', type=str, required=True)
@@ -77,12 +77,12 @@ def main() -> None:
     torch.save({'model_state_dict': model.state_dict()}, save_dir / 'best_model.pt')
     save_predictions(save_dir / 'test_predictions.npz', test_metrics['probabilities'], test_metrics['labels'], test_split.patient_ids)
     save_json(save_dir / 'metrics.json', {
-        'benchmark': 'labtests_only_transformer',
+        'benchmark': 'structured_measurements_only_transformer',
         'best_valid': best_valid,
         'test': {k: float(v) for k, v in test_metrics.items() if isinstance(v, (int, float))},
         'history': history,
     })
-    print(f'LabTests-only benchmark complete: {save_dir}')
+    print(f'Structured-only benchmark complete: {save_dir}')
     print(f"Test AUROC={test_metrics['auroc']:.4f}, AUPRC={test_metrics['auprc']:.4f}, F1={test_metrics['f1']:.4f}")
 
 

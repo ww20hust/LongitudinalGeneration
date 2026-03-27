@@ -125,7 +125,7 @@ git clone https://github.com/MarioniLab/StabMap.git baseline-model/StabMap
 ```bash
 python scripts/Benchmark-single-cell-Method/run_midas.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/midas \
+  --output-dir scripts/Benchmark-single-cell-Method/outputs/midas \
   --train-ratio 0.7 \
   --split-seed 0
 ```
@@ -133,7 +133,7 @@ python scripts/Benchmark-single-cell-Method/run_midas.py \
 ```bash
 python scripts/Benchmark-single-cell-Method/run_scvaeit.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/scvaeit \
+  --output-dir scripts/Benchmark-single-cell-Method/outputs/scvaeit \
   --train-ratio 0.7 \
   --split-seed 0
 ```
@@ -141,7 +141,7 @@ python scripts/Benchmark-single-cell-Method/run_scvaeit.py \
 ```bash
 python scripts/Benchmark-single-cell-Method/run_stabmap_from_csv.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/stabmap \
+  --output-dir scripts/Benchmark-single-cell-Method/outputs/stabmap \
   --train-ratio 0.7 \
   --split-seed 0
 ```
@@ -149,7 +149,7 @@ python scripts/Benchmark-single-cell-Method/run_stabmap_from_csv.py \
 ```bash
 python scripts/Benchmark-single-cell-Method/run_peag.py \
   --csv data/clinical_two_visit.csv \
-  --output-dir outputs/peag \
+  --output-dir scripts/Benchmark-single-cell-Method/outputs/peag \
   --train-ratio 0.7 \
   --split-seed 0 \
   --train-mask-rate 0.6

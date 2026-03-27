@@ -188,7 +188,7 @@ class TransformersTextEmbedder:
                 tokenized = {key: value.to(self.input_device) for key, value in tokenized.items()}
                 outputs = self.model(**tokenized)
                 pooled = _mean_pool(outputs.last_hidden_state, tokenized["attention_mask"])
-                embedding_batches.append(pooled.cpu().numpy().astype(np.float32))
+                embedding_batches.append(pooled.float().cpu().numpy())
         return np.concatenate(embedding_batches, axis=0)
 
 

@@ -84,7 +84,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/transformer_benchmar
   --train_path data/proteomics_train.jsonl \
   --valid_path data/proteomics_valid.jsonl \
   --test_path data/proteomics_test.jsonl \
-  --save_dir outputs/transformer_benchmark
+  --save_dir scripts/Bencmark-EHR-Modeling/outputs/transformer_benchmark
 ```
 
 `transformer_benchmark.py` is configured to train end-to-end on a single 24 GB
@@ -108,9 +108,9 @@ CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/llama31_benchmark.py
   --train_path data/proteomics_train.jsonl \
   --valid_path data/proteomics_valid.jsonl \
   --test_path data/proteomics_test.jsonl \
-  --save_dir outputs/llama31_benchmark \
-  --llama_model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
-  --cache_dir outputs/llama31_cache
+  --save_dir scripts/Bencmark-EHR-Modeling/outputs/llama31_benchmark \
+  --llama_model_name_or_path meta-llama/Llama-3.1-8B \
+  --cache_dir scripts/Bencmark-EHR-Modeling/outputs/llama31_cache
 ```
 
 For a 24 GB GPU, prefer reduced-precision loading for the frozen Llama encoder.
@@ -123,13 +123,13 @@ CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/llama31_benchmark.py
   --train_path data/proteomics_train.jsonl \
   --valid_path data/proteomics_valid.jsonl \
   --test_path data/proteomics_test.jsonl \
-  --save_dir outputs/llama31_benchmark \
-  --llama_model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
+  --save_dir scripts/Bencmark-EHR-Modeling/outputs/llama31_benchmark \
+  --llama_model_name_or_path meta-llama/Llama-3.1-8B \
   --llama_device cuda:0 \
   --llama_dtype float16 \
   --embedding_batch_size 1 \
   --max_length 512 \
-  --cache_dir outputs/llama31_cache
+  --cache_dir scripts/Bencmark-EHR-Modeling/outputs/llama31_cache
 ```
 
 If 24 GB is still tight, add `--llama_load_in_8bit`. For the smallest memory
@@ -143,9 +143,9 @@ CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/peag_benchmark.py \
   --train_path data/proteomics_train.jsonl \
   --valid_path data/proteomics_valid.jsonl \
   --test_path data/proteomics_test.jsonl \
-  --save_dir outputs/peag_benchmark \
-  --llama_model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
-  --cache_dir outputs/peag_cache
+  --save_dir scripts/Bencmark-EHR-Modeling/outputs/peag_benchmark \
+  --llama_model_name_or_path meta-llama/Llama-3.1-8B \
+  --cache_dir scripts/Bencmark-EHR-Modeling/outputs/peag_cache
 ```
 
 The same Llama loading flags are available in `peag_benchmark.py` because PEAG
@@ -158,13 +158,13 @@ CUDA_VISIBLE_DEVICES=0 python scripts/Bencmark-EHR-Modeling/peag_benchmark.py \
   --train_path data/proteomics_train.jsonl \
   --valid_path data/proteomics_valid.jsonl \
   --test_path data/proteomics_test.jsonl \
-  --save_dir outputs/peag_benchmark \
-  --llama_model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
+  --save_dir scripts/Bencmark-EHR-Modeling/outputs/peag_benchmark \
+  --llama_model_name_or_path meta-llama/Llama-3.1-8B \
   --llama_device cuda:0 \
   --llama_dtype float16 \
   --embedding_batch_size 1 \
   --max_length 512 \
-  --cache_dir outputs/peag_cache
+  --cache_dir scripts/Bencmark-EHR-Modeling/outputs/peag_cache
 ```
 
 ## Outputs
