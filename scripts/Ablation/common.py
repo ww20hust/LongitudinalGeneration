@@ -5,7 +5,7 @@ import random
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -47,6 +47,8 @@ def add_common_experiment_args(parser) -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--val-ratio", type=float, default=0.2)
+    parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--latent-dim", type=int, default=16)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--lambda-kl", type=float, default=1.0)
@@ -68,6 +70,61 @@ def set_random_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+class EarlyStopper:
+    def __init__(self, patience: int) -> None:
+        self.patience = int(patience)
+        self.best_value: float | None = None
+        self.best_state: dict[str, torch.Tensor] | None = None
+        self.num_bad_epochs = 0
+
+    def step(self, value: float, model: torch.nn.Module) -> bool:
+        improved = self.best_value is None or value < self.best_value
+        if improved:
+            self.best_value = float(value)
+            self.best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            self.num_bad_epochs = 0
+            return False
+        self.num_bad_epochs += 1
+        return self.num_bad_epochs >= self.patience
+
+    def restore(self, model: torch.nn.Module) -> None:
+        if self.best_state is not None:
+            model.load_state_dict(self.best_state)
+
+
+def _split_train_validation(
+    patient_ids: Sequence[str],
+    visits: Sequence[Sequence[dict[str, np.ndarray | None]]],
+    masks: Sequence[Sequence[dict[str, int]]],
+    *,
+    val_ratio: float,
+    seed: int,
+) -> tuple[list[str], list, list, list[str], list, list]:
+    if val_ratio <= 0.0 or len(patient_ids) < 2:
+        return list(patient_ids), list(visits), list(masks), [], [], []
+    rng = np.random.RandomState(seed)
+    indices = np.arange(len(patient_ids))
+    rng.shuffle(indices)
+    val_count = max(1, int(round(len(indices) * val_ratio)))
+    val_indices = set(indices[:val_count].tolist())
+    train_ids: list[str] = []
+    train_visits: list = []
+    train_masks: list = []
+    val_ids: list[str] = []
+    val_visits: list = []
+    val_masks: list = []
+    for idx, patient_id in enumerate(patient_ids):
+        if idx in val_indices:
+            val_ids.append(patient_id)
+            val_visits.append(visits[idx])
+            val_masks.append(masks[idx])
+        else:
+            train_ids.append(patient_id)
+            train_visits.append(visits[idx])
+            train_masks.append(masks[idx])
+    return train_ids, train_visits, train_masks, val_ids, val_visits, val_masks
 
 
 def build_bundle_from_args(args):
@@ -111,10 +168,25 @@ def build_model_from_args(args, bundle, **overrides: Any) -> PEAGModel:
 
 def train_model(bundle, args, experiment_dir: Path, **model_overrides: Any):
     set_random_seed(args.seed)
+    (
+        train_ids,
+        train_visits,
+        train_masks,
+        val_ids,
+        val_visits,
+        val_masks,
+    ) = _split_train_validation(
+        bundle.train_patient_ids,
+        bundle.train_visits,
+        bundle.train_missing_masks,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
+    )
+
     dataset = LongitudinalDataset(
-        patient_ids=bundle.train_patient_ids,
-        visits_data=bundle.train_visits,
-        missing_masks=bundle.train_missing_masks,
+        patient_ids=train_ids,
+        visits_data=train_visits,
+        missing_masks=train_masks,
         train_mask_rate=args.train_mask_rate,
     )
     dataloader = DataLoader(
@@ -138,13 +210,57 @@ def train_model(bundle, args, experiment_dir: Path, **model_overrides: Any):
         kl_anneal_epochs=args.kl_anneal_epochs,
     )
     checkpoints_dir = experiment_dir / "checkpoints"
-    history = trainer.train(
-        dataloader=dataloader,
-        n_epochs=args.epochs,
-        save_dir=str(checkpoints_dir),
-        validate_every=args.save_every,
+    history: list[dict[str, float]] = []
+    best_epoch = None
+    stopper = EarlyStopper(patience=args.patience) if val_ids else None
+
+    for epoch in range(args.epochs):
+        epoch_losses = trainer.train_epoch(dataloader)
+        record: dict[str, float] = {key: float(value) for key, value in epoch_losses.items()}
+
+        if val_ids:
+            prior_best = stopper.best_value if stopper is not None else None
+            val_metrics = _evaluate_followup_imputation_on_split(
+                model,
+                visits=val_visits,
+                masks=val_masks,
+                metab_scaler=bundle.metab_scaler,
+                device=args.device,
+            )
+            record.update(
+                {
+                    "val_mse": float(val_metrics["mse"]),
+                    "val_mae": float(val_metrics["mae"]),
+                    "val_pearson_mean": float(val_metrics["pearson_mean"]),
+                }
+            )
+            should_stop = stopper.step(float(val_metrics["mse"]), model) if stopper is not None else False
+            improved = prior_best is None or float(val_metrics["mse"]) < prior_best
+            if stopper is not None and improved:
+                best_epoch = epoch + 1
+                trainer.save_checkpoint(str(experiment_dir / "model_best.pt"))
+
+        history.append(record)
+
+        if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+            trainer.save_checkpoint(str(checkpoints_dir / f"checkpoint_epoch_{epoch + 1}.pt"))
+
+        if val_ids and should_stop:
+            break
+
+    if stopper is not None:
+        stopper.restore(model)
+    save_json(
+        {
+            "history": history,
+            "model_config": model.get_config(),
+            "val_ratio": args.val_ratio,
+            "patience": args.patience,
+            "best_epoch": best_epoch,
+        },
+        experiment_dir / "train_history.json",
     )
-    save_json({"history": history, "model_config": model.get_config()}, experiment_dir / "train_history.json")
     final_checkpoint = experiment_dir / "model_final.pt"
     trainer.save_checkpoint(str(final_checkpoint))
     return model, history
@@ -158,6 +274,58 @@ def _to_tensor_visit(visit: dict[str, np.ndarray | None], device: str) -> dict[s
         else:
             visit_tensors[modality_name] = torch.as_tensor(values, dtype=torch.float32, device=device).unsqueeze(0)
     return visit_tensors
+
+
+def _evaluate_followup_imputation_on_split(
+    model: PEAGModel,
+    *,
+    visits: Sequence[Sequence[dict[str, np.ndarray | None]]],
+    masks: Sequence[Sequence[dict[str, int]]],
+    metab_scaler,
+    device: str,
+) -> dict[str, float]:
+    model.eval()
+    predictions_scaled: list[np.ndarray] = []
+    truths_scaled: list[np.ndarray] = []
+    with torch.no_grad():
+        for patient_visits, patient_masks in zip(visits, masks):
+            if len(patient_visits) < 2:
+                continue
+            followup_visit = patient_visits[1]
+            followup_mask = patient_masks[1]
+            if followup_mask.get("metab", 2) != 0 or followup_visit.get("metab") is None:
+                continue
+            if followup_mask.get("lab", 2) != 0 or followup_visit.get("lab") is None:
+                continue
+
+            visits_input = []
+            masks_input = []
+            for visit_index, (visit, visit_mask) in enumerate(zip(patient_visits, patient_masks)):
+                visit_tensor = _to_tensor_visit(visit, device)
+                current_mask = dict(visit_mask)
+                if visit_index == 1:
+                    visit_tensor["metab"] = None
+                    current_mask["metab"] = 2
+                visits_input.append(visit_tensor)
+                masks_input.append(current_mask)
+
+            output = model(
+                visits_data=visits_input,
+                missing_masks=masks_input,
+                kl_annealing_weight=1.0,
+                use_history_in_fusion=True,
+            )
+            predictions_scaled.append(output["reconstructions"][-1]["metab"][0].detach().cpu().numpy())
+            truths_scaled.append(followup_visit["metab"])
+
+    if not predictions_scaled:
+        raise ValueError("No validation samples available for follow-up evaluation.")
+
+    pred_scaled = np.asarray(predictions_scaled, dtype=np.float32)
+    truth_scaled = np.asarray(truths_scaled, dtype=np.float32)
+    pred_raw = metab_scaler.inverse_transform(pred_scaled)
+    truth_raw = metab_scaler.inverse_transform(truth_scaled)
+    return evaluate_reconstruction(truth_raw, pred_raw)
 
 
 def evaluate_followup_imputation(

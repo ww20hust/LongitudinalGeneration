@@ -32,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--val-ratio", type=float, default=0.2)
+    parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--latent-dim", type=int, default=16)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--lambda-kl", type=float, default=1.0)
@@ -90,6 +92,8 @@ def main() -> None:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
+        val_ratio=args.val_ratio,
+        patience=args.patience,
         latent_dim=args.latent_dim,
         hidden_dim=args.hidden_dim,
         lambda_kl=args.lambda_kl,

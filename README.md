@@ -11,6 +11,14 @@ pip install -e .
 
 Requires Python 3.8+, PyTorch 1.9+, NumPy, and optionally `tqdm`.
 
+To install the base dependencies from the repository:
+
+```bash
+pip install -r requirements.txt
+```
+
+Benchmark-specific dependencies are documented in each benchmark folder README.
+
 ## Quick Start
 
 ```python
@@ -54,36 +62,31 @@ history = trainer.train(dataloader, n_epochs=50)
   <img src="docs/peag_missing_imputation_diagram.svg" alt="PEAG input-output demo" width="1200">
 </p>
 
-## Paper Reproduction and Benchmarks
-
-The repository includes dedicated folders for reproducing the paper's ablation
-studies and benchmark experiments.
+## Paper-to-Code Mapping (Reproducibility)
 
 - `scripts/Ablation/`
-  Contains PEAG ablation code for the two-visit metabolomics imputation task.
-  This folder includes:
-
-  - historical-state ablation at inference time
-  - alignment-strategy ablations, including directional stop-gradient and point-wise alignment
-  - loss ablations for removing `L_align` and `L_adv`
-  - active-masking probability sensitivity analysis
+  PEAG ablations on the two-visit metabolomics imputation task:
+  - historical-state ablation: `scripts/Ablation/run_metabolomics_ablations.py`
+  - alignment variants (stop-gradient, point-wise): `scripts/Ablation/run_metabolomics_ablations.py`
+  - loss ablations (remove `L_align`, remove `L_adv`): `scripts/Ablation/run_metabolomics_ablations.py`
+  - active-masking sensitivity: `scripts/Ablation/run_mask_probability_sensitivity.py`
 - `scripts/Benchmark-single-cell-Method/`
-  Contains the adapted static single-cell multimodal baselines used for the
-  metabolomics imputation benchmark. This folder includes:
-
-  - `MIDAS`
-  - `scVAEIT`
-  - `StabMap`
-  - the shared patient-level split and CSV-to-benchmark preparation pipeline
+  Four models for metabolomics imputation:
+  - MIDAS: `scripts/Benchmark-single-cell-Method/run_midas.py`
+  - scVAEIT: `scripts/Benchmark-single-cell-Method/run_scvaeit.py`
+  - StabMap: `scripts/Benchmark-single-cell-Method/run_stabmap_from_csv.py`
+  - PEAG: `scripts/Benchmark-single-cell-Method/run_peag.py`
 - `scripts/Bencmark-EHR-Modeling/`
-  Contains the paper's clinical patient-representation / EHR modeling
-  benchmarks for the proteomics generation task. This folder includes:
-
-  - a PEAG-based benchmark
-  - a Transformer benchmark
-  - a Llama 3.1 benchmark
-  - shared utilities for loading history + current-lab inputs and reporting
-    proteomics prediction metrics
+  Four models for EHR/proteomics-generation:
+  - PEAG: `scripts/Bencmark-EHR-Modeling/peag_benchmark.py`
+  - Transformer: `scripts/Bencmark-EHR-Modeling/transformer_benchmark.py`
+  - Llama 3.1: `scripts/Bencmark-EHR-Modeling/llama31_benchmark.py`
+- `scripts/PEAG_MIMIC/`
+  Four models for MIMIC-III:
+  - note-only Llama: `scripts/PEAG_MIMIC/run_notes_only.py`
+  - lab-only Transformer: `scripts/PEAG_MIMIC/run_lab_transformer.py`
+  - late-fusion (Llama + labs): `scripts/PEAG_MIMIC/run_simply_combined.py`
+  - PEAG: `scripts/PEAG_MIMIC/run_peag.py`
 
 ## Recommended Data Format for Your Specific Task
 
@@ -146,20 +149,6 @@ Here `M_total` counts only the currently observed modalities and does not
 include the historical state `Z_P`.
 
 5. Decodes every modality from the fused visit state.
-
-## Active Masking
-
-During training, PEAG applies single-modality active masking:
-
-- For each visit, one currently observed modality is randomly masked with
-  probability `0.6`.
-- Naturally missing modalities remain marked as `2`.
-- If a visit has only one observed modality, it is not actively masked so the
-  model always retains at least one current modality plus history.
-
-This setting follows the paper revision: the model reconstructs the masked
-modality from the remaining available modality information together with the
-historical state.
 
 ## Temporal Module Options
 
