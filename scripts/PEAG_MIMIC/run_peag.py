@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from peag.model import PEAGModel
 
-from common import EarlyStopper, batch_to_device, compute_binary_metrics, compute_pos_weight, create_loader, create_tensor_dataset, load_or_compute_sequence_embeddings, load_prepared_split, save_json, save_predictions, set_seed
+from common import EarlyStopper, batch_to_device, compute_binary_metrics, compute_binary_metrics_ci, compute_pos_weight, create_loader, create_tensor_dataset, load_or_compute_sequence_embeddings, load_prepared_split, save_json, save_predictions, set_seed
 from llama_embeddings import add_llama_embedding_args, build_text_embedder, default_torch_device
 
 
@@ -131,6 +131,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--pooling', type=str, default='last', choices=['last', 'mean'])
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--ci_samples', type=int, default=1000)
+    parser.add_argument('--ci_seed', type=int, default=0)
     add_llama_embedding_args(parser)
     return parser.parse_args()
 
@@ -254,6 +256,12 @@ def main() -> None:
     pos_weight = compute_pos_weight(train_split.labels)
     model, history, best_valid = fit_peag(model, train_loader, valid_loader, device=device, epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, pos_weight=pos_weight, patience=args.patience, peag_loss_weight=args.peag_loss_weight)
     test_metrics = evaluate_peag(model, test_loader, device=device, pos_weight=pos_weight, peag_loss_weight=args.peag_loss_weight)
+    test_ci = compute_binary_metrics_ci(
+        test_metrics['labels'],
+        test_metrics['probabilities'],
+        n_boot=args.ci_samples,
+        seed=args.ci_seed,
+    )
 
     torch.save({'model_state_dict': model.state_dict(), 'note_dim': int(train_note_embeddings.shape[-1])}, save_dir / 'best_model.pt')
     save_predictions(save_dir / 'test_predictions.npz', test_metrics['probabilities'], test_metrics['labels'], test_split.patient_ids)
@@ -262,6 +270,7 @@ def main() -> None:
         'llama_model_name_or_path': args.llama_model_name_or_path,
         'best_valid': best_valid,
         'test': {k: float(v) for k, v in test_metrics.items() if isinstance(v, (int, float, np.floating))},
+        'test_ci': test_ci,
         'history': history,
         'config': {
             'latent_dim': args.latent_dim,

@@ -5,6 +5,7 @@ import json
 import math
 import pickle
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -187,6 +188,51 @@ def compute_binary_metrics(labels: np.ndarray, probabilities: np.ndarray, thresh
     return metrics
 
 
+def compute_binary_metrics_ci(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    n_boot: int = 1000,
+    seed: int = 0,
+    alpha: float = 0.05,
+) -> Dict[str, Dict[str, float]]:
+    labels = np.asarray(labels, dtype=np.float32)
+    probabilities = np.asarray(probabilities, dtype=np.float32)
+    if labels.shape[0] != probabilities.shape[0]:
+        raise ValueError("labels and probabilities must have the same length.")
+    n_samples = labels.shape[0]
+    if n_samples == 0:
+        raise ValueError("No samples available for confidence interval estimation.")
+
+    metric_names = ["auroc", "auprc", "accuracy", "f1", "precision", "recall"]
+    rng = np.random.RandomState(seed)
+    boot_values: Dict[str, List[float]] = {name: [] for name in metric_names}
+
+    for _ in range(int(n_boot)):
+        indices = rng.randint(0, n_samples, size=n_samples)
+        try:
+            metrics = compute_binary_metrics(labels[indices], probabilities[indices])
+        except ValueError:
+            metrics = {}
+        for name in metric_names:
+            value = metrics.get(name, float("nan"))
+            boot_values[name].append(float(value))
+
+    ci: Dict[str, Dict[str, float]] = {}
+    lower_pct = 100.0 * (alpha / 2.0)
+    upper_pct = 100.0 * (1.0 - alpha / 2.0)
+    for name, values in boot_values.items():
+        arr = np.asarray(values, dtype=np.float64)
+        if np.all(np.isnan(arr)):
+            ci[name] = {"low": float("nan"), "high": float("nan")}
+        else:
+            ci[name] = {
+                "low": float(np.nanpercentile(arr, lower_pct)),
+                "high": float(np.nanpercentile(arr, upper_pct)),
+            }
+    return ci
+
+
 def compute_pos_weight(labels: np.ndarray) -> float:
     labels = np.asarray(labels, dtype=np.float32)
     positives = float(labels.sum())
@@ -321,7 +367,48 @@ def evaluate_classifier(model: torch.nn.Module, loader: DataLoader, device: torc
     return run_classifier_epoch(model, loader, None, criterion, device)
 
 
-def _cache_filename(
+def _sanitize_for_filename(value: str) -> str:
+    base = Path(str(value)).name.strip()
+    if not base:
+        return 'unknown_model'
+    return re.sub(r'[^A-Za-z0-9._-]+', '-', base)
+
+
+def _cache_filename_v2(
+    split: PreparedBinarySplit,
+    *,
+    split_name: str,
+    kind: str,
+    embedder,
+    max_length: int,
+) -> str:
+    model_name = getattr(embedder, 'model_name_or_path', None)
+    if model_name is None:
+        model = getattr(embedder, 'model', None)
+        model_name = getattr(model, 'name_or_path', 'unknown_model')
+    model_tag = _sanitize_for_filename(str(model_name))
+    num_documents = len(split.document_texts)
+    sequence_length = len(split.peag_note_texts[0]) if split.peag_note_texts else 0
+    return (
+        f'{split_name}_{kind}'
+        f'_model-{model_tag}'
+        f'_maxlen-{int(max_length)}'
+        f'_n-{int(num_documents)}'
+        f'_seq-{int(sequence_length)}'
+        '.npz'
+    )
+
+
+def _find_legacy_hash_cache(cache_dir: Path, *, split_name: str, kind: str) -> List[Path]:
+    pattern = re.compile(rf"^{re.escape(split_name)}_{re.escape(kind)}_[0-9a-f]{{12}}\.npz$")
+    matches: List[Path] = []
+    for entry in cache_dir.iterdir():
+        if entry.is_file() and pattern.match(entry.name):
+            matches.append(entry)
+    return sorted(matches)
+
+
+def _legacy_cache_filename(
     split: PreparedBinarySplit,
     *,
     split_name: str,
@@ -358,10 +445,11 @@ def load_or_compute_document_embeddings(
     max_length: int,
 ) -> np.ndarray:
     cache_path: Optional[Path] = None
+    legacy_cache_path: Optional[Path] = None
     if cache_dir is not None:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
-        cache_path = cache_path / _cache_filename(
+        cache_path = cache_path / _cache_filename_v2(
             split,
             split_name=split_name,
             kind='document_embeddings',
@@ -369,7 +457,38 @@ def load_or_compute_document_embeddings(
             max_length=max_length,
         )
         if cache_path.exists():
+            print(f"Document embedding cache hit (v2): {cache_path}")
             return np.load(cache_path, allow_pickle=False)['embeddings'].astype(np.float32)
+        legacy_cache_path = cache_path.parent / _legacy_cache_filename(
+            split,
+            split_name=split_name,
+            kind='document_embeddings',
+            embedder=embedder,
+            max_length=max_length,
+        )
+        if legacy_cache_path.exists():
+            print(f"Document embedding cache hit (legacy): {legacy_cache_path}")
+            embeddings = np.load(legacy_cache_path, allow_pickle=False)['embeddings'].astype(np.float32)
+            np.savez_compressed(cache_path, embeddings=embeddings)
+            return embeddings
+        legacy_candidates = _find_legacy_hash_cache(
+            cache_path.parent,
+            split_name=split_name,
+            kind='document_embeddings',
+        )
+        if len(legacy_candidates) == 1:
+            legacy_any = legacy_candidates[0]
+            print(f"Document embedding cache hit (legacy-any): {legacy_any}")
+            embeddings = np.load(legacy_any, allow_pickle=False)['embeddings'].astype(np.float32)
+            np.savez_compressed(cache_path, embeddings=embeddings)
+            return embeddings
+        if len(legacy_candidates) > 1:
+            names = ', '.join(candidate.name for candidate in legacy_candidates)
+            raise ValueError(
+                f"Multiple legacy document embedding caches found for {split_name}: {names}. "
+                "Please keep only the intended cache file in the cache_dir."
+            )
+        print(f"Document embedding cache miss: {cache_path}")
 
     non_empty_indices = [idx for idx, text in enumerate(split.document_texts) if str(text).strip()]
     if non_empty_indices:
@@ -396,10 +515,11 @@ def load_or_compute_sequence_embeddings(
     max_length: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     cache_path: Optional[Path] = None
+    legacy_cache_path: Optional[Path] = None
     if cache_dir is not None:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
-        cache_path = cache_path / _cache_filename(
+        cache_path = cache_path / _cache_filename_v2(
             split,
             split_name=split_name,
             kind='sequence_embeddings',
@@ -409,6 +529,37 @@ def load_or_compute_sequence_embeddings(
         if cache_path.exists():
             payload = np.load(cache_path, allow_pickle=False)
             return payload['embeddings'].astype(np.float32), payload['mask'].astype(np.float32)
+        legacy_cache_path = cache_path.parent / _legacy_cache_filename(
+            split,
+            split_name=split_name,
+            kind='sequence_embeddings',
+            embedder=embedder,
+            max_length=max_length,
+        )
+        if legacy_cache_path.exists():
+            payload = np.load(legacy_cache_path, allow_pickle=False)
+            embeddings = payload['embeddings'].astype(np.float32)
+            mask = payload['mask'].astype(np.float32)
+            np.savez_compressed(cache_path, embeddings=embeddings, mask=mask)
+            return embeddings, mask
+        legacy_candidates = _find_legacy_hash_cache(
+            cache_path.parent,
+            split_name=split_name,
+            kind='sequence_embeddings',
+        )
+        if len(legacy_candidates) == 1:
+            legacy_any = legacy_candidates[0]
+            payload = np.load(legacy_any, allow_pickle=False)
+            embeddings = payload['embeddings'].astype(np.float32)
+            mask = payload['mask'].astype(np.float32)
+            np.savez_compressed(cache_path, embeddings=embeddings, mask=mask)
+            return embeddings, mask
+        if len(legacy_candidates) > 1:
+            names = ', '.join(candidate.name for candidate in legacy_candidates)
+            raise ValueError(
+                f"Multiple legacy sequence embedding caches found for {split_name}: {names}. "
+                "Please keep only the intended cache file in the cache_dir."
+            )
 
     n_samples = len(split.peag_note_texts)
     seq_len = len(split.peag_note_texts[0]) if n_samples > 0 else 0

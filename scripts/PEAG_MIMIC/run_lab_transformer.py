@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from common import compute_pos_weight, create_loader, create_tensor_dataset, evaluate_classifier, fit_classifier, load_prepared_split, save_json, save_predictions, set_seed
+from common import compute_binary_metrics_ci, compute_pos_weight, create_loader, create_tensor_dataset, evaluate_classifier, fit_classifier, load_prepared_split, save_json, save_predictions, set_seed
 from models import LabTransformerClassifier
 
 
@@ -28,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--ci_samples', type=int, default=1000)
+    parser.add_argument('--ci_seed', type=int, default=0)
     return parser.parse_args()
 
 
@@ -73,6 +75,12 @@ def main() -> None:
         patience=args.patience,
     )
     test_metrics = evaluate_classifier(model, test_loader, device, pos_weight=pos_weight)
+    test_ci = compute_binary_metrics_ci(
+        test_metrics['labels'],
+        test_metrics['probabilities'],
+        n_boot=args.ci_samples,
+        seed=args.ci_seed,
+    )
 
     torch.save({'model_state_dict': model.state_dict()}, save_dir / 'best_model.pt')
     save_predictions(save_dir / 'test_predictions.npz', test_metrics['probabilities'], test_metrics['labels'], test_split.patient_ids)
@@ -80,6 +88,7 @@ def main() -> None:
         'benchmark': 'structured_measurements_only_transformer',
         'best_valid': best_valid,
         'test': {k: float(v) for k, v in test_metrics.items() if isinstance(v, (int, float))},
+        'test_ci': test_ci,
         'history': history,
     })
     print(f'Structured-only benchmark complete: {save_dir}')

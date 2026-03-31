@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from common import compute_pos_weight, create_loader, create_tensor_dataset, evaluate_classifier, fit_classifier, load_or_compute_document_embeddings, load_prepared_split, save_json, save_predictions, set_seed
+from common import compute_binary_metrics_ci, compute_pos_weight, create_loader, create_tensor_dataset, evaluate_classifier, fit_classifier, load_or_compute_document_embeddings, load_prepared_split, save_json, save_predictions, set_seed
 from llama_embeddings import add_llama_embedding_args, build_text_embedder, default_torch_device
 from models import NotesOnlyLlamaClassifier
 
@@ -30,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--ci_samples', type=int, default=1000)
+    parser.add_argument('--ci_seed', type=int, default=0)
     add_llama_embedding_args(parser)
     return parser.parse_args()
 
@@ -62,6 +64,12 @@ def main() -> None:
     pos_weight = compute_pos_weight(train_split.labels)
     model, history, best_valid = fit_classifier(model, train_loader, valid_loader, device, epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, pos_weight=pos_weight, patience=args.patience)
     test_metrics = evaluate_classifier(model, test_loader, device, pos_weight=pos_weight)
+    test_ci = compute_binary_metrics_ci(
+        test_metrics['labels'],
+        test_metrics['probabilities'],
+        n_boot=args.ci_samples,
+        seed=args.ci_seed,
+    )
 
     torch.save({'model_state_dict': model.state_dict(), 'document_dim': int(train_doc_embeddings.shape[-1])}, save_dir / 'best_model.pt')
     save_predictions(save_dir / 'test_predictions.npz', test_metrics['probabilities'], test_metrics['labels'], test_split.patient_ids)
@@ -70,6 +78,7 @@ def main() -> None:
         'llama_model_name_or_path': args.llama_model_name_or_path,
         'best_valid': best_valid,
         'test': {k: float(v) for k, v in test_metrics.items() if isinstance(v, (int, float))},
+        'test_ci': test_ci,
         'history': history,
     })
     print(f'Notes-only benchmark complete: {save_dir}')
